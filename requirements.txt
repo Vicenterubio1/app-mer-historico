@@ -1,0 +1,8 @@
+streamlit
+pandas
+psycopg2-binary
+openpyxl
+xlsxwriter
+fpdf2
+reportlab
+plotly
