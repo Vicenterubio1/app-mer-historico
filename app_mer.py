@@ -21,11 +21,11 @@ from consultar_mer import (
     construir_df_top_agente_hora,
     construir_df_mensual_cnd,
     generar_pdf_reporte_cnd,
-    generar_pdf_informe_compra_venta,
     obtener_diccionario_agentes,
     formatear_fecha_corta_es,
     PREFIJO_PAIS,
 )
+from reporte_compra_venta_pdf import generar_pdf_informe_compra_venta
 
 st.set_page_config(page_title="Gestión Histórica MER", page_icon="⚡", layout="wide")
 
