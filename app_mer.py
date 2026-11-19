@@ -355,6 +355,10 @@ def cargar_auditoria_cache():
 # Inicializar entorno una única vez por proceso
 usa_pg = preparar_entorno_bd()
 
+# Estado para limpiar automáticamente la lista de archivos subidos tras procesar
+if "uploader_zip_key" not in st.session_state:
+    st.session_state["uploader_zip_key"] = 0
+
 # ==========================================
 # ENCABEZADO Y BARRA LATERAL
 # ==========================================
@@ -1072,6 +1076,7 @@ with tab_ingesta:
         "Selecciona o arrastra tus archivos PUB004-PRE-*.zip",
         type=["zip"],
         accept_multiple_files=True,
+        key=f"uploader_zip_{st.session_state['uploader_zip_key']}",
     )
 
     if archivos_subidos:
@@ -1093,12 +1098,16 @@ with tab_ingesta:
                 c_sync.close()
 
             st.cache_data.clear()
-            salida_proceso = log_buffer.getvalue().strip()
-            st.success("✅ ¡Sincronización completada y catálogo actualizado!")
-            if salida_proceso:
-                st.code(salida_proceso, language="text")
-            else:
-                st.warning("No se encontraron archivos válidos con patrón PUB004-*.xlsx dentro del ZIP.")
+            st.session_state["ultimo_log_ingesta"] = log_buffer.getvalue().strip()
+            st.session_state["uploader_zip_key"] += 1
+            st.rerun()
+
+    if "ultimo_log_ingesta" in st.session_state:
+        st.success("✅ ¡Sincronización completada y catálogo actualizado!")
+        if st.session_state["ultimo_log_ingesta"]:
+            st.code(st.session_state["ultimo_log_ingesta"], language="text")
+        else:
+            st.warning("No se encontraron archivos válidos con patrón PUB004-*.xlsx dentro del ZIP.")
 
 # ------------------------------------------
 # PESTAÑA 4: AUDITORÍA DEL HISTORIAL
