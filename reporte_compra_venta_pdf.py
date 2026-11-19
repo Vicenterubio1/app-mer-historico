@@ -4,6 +4,7 @@ from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     SimpleDocTemplate,
     Table,
@@ -27,6 +28,20 @@ def _formatear_fecha_larga_es(fecha_str):
         "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
     ]
     return f"{dias[dt.weekday()]}, {dt.day} de {meses[dt.month - 1]} de {dt.year}"
+
+
+def _construir_logo_proporcional(ruta_logo, max_w, max_h, estilo_fallback):
+    """Carga el logo manteniendo su relación de aspecto original sin deformarlo."""
+    if ruta_logo and os.path.exists(ruta_logo):
+        try:
+            lector = ImageReader(ruta_logo)
+            iw, ih = lector.getSize()
+            if iw > 0 and ih > 0:
+                escala = min(max_w / float(iw), max_h / float(ih))
+                return RLImage(ruta_logo, width=iw * escala, height=ih * escala)
+        except Exception:
+            pass
+    return Paragraph("<b>CENTRO NACIONAL<br/>DE DESPACHO</b>", estilo_fallback)
 
 
 def generar_pdf_informe_compra_venta(
@@ -86,23 +101,12 @@ def generar_pdf_informe_compra_venta(
         alignment=TA_CENTER,
     )
 
-    logo_cell = Paragraph("<b>CENTRO NACIONAL<br/>DE DESPACHO</b>", estilo_cnd)
-    if ruta_logo and os.path.exists(ruta_logo):
-        img_logo = RLImage(ruta_logo, width=0.55 * inch, height=0.55 * inch)
-        enc_izq = Table(
-            [[img_logo, Paragraph("<b>CENTRO NACIONAL<br/>DE DESPACHO</b>", estilo_cnd)]],
-            colWidths=[0.65 * inch, 1.55 * inch],
-        )
-        enc_izq.setStyle(
-            TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ])
-        )
-        logo_cell = enc_izq
+    logo_cell = _construir_logo_proporcional(
+        ruta_logo=ruta_logo,
+        max_w=2.05 * inch,
+        max_h=0.68 * inch,
+        estilo_fallback=estilo_cnd,
+    )
 
     titulo_texto = "INFORME DE COMPRA Y VENTA DE ENERGÍA REGIONAL"
     if pais_filtro:
@@ -128,6 +132,7 @@ def generar_pdf_informe_compra_venta(
         TableStyle([
             ("BOX", (0, 0), (-1, -1), 1.2, colors.black),
             ("LINEBEFORE", (1, 0), (1, 0), 1.0, colors.black),
+            ("ALIGN", (0, 0), (0, 0), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -136,7 +141,7 @@ def generar_pdf_informe_compra_venta(
     elementos.append(tabla_encabezado)
     elementos.append(Spacer(1, 0.08 * inch))
 
-    fila_hdr_1 = ["FECHA", "HORA", "RETIROS", "", "TOTAL COMPRAS", "INYECCIONES", "", "TOTAL VENTAS"]
+    fila_hdr_1 = ["FECHA", "HORA", "RETIROS", "", "TOTAL\nCOMPRAS", "INYECCIONES", "", "TOTAL\nVENTAS"]
     fila_hdr_2 = ["", "", "CONTRATOS", "OPORTUNIDAD", "", "CONTRATOS", "OPORTUNIDAD", ""]
     fila_hdr_3 = ["", "", "MWh", "MWh", "MWh", "MWh", "MWh", "MWh"]
 
