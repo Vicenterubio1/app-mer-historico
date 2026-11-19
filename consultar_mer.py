@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from consultar_mer import construir_df_balance_horario, formatear_fecha_corta_es
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
