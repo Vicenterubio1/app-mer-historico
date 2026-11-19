@@ -40,7 +40,7 @@ def limpiar_codigo(val):
 
 
 # ==========================================
-# FUNCIONES DE CATÁLOGO MAESTRO
+# FUNCIONES DE CATÁLOGO MAESTRO E INICIALIZACIÓN
 # ==========================================
 def inicializar_y_sincronizar_catalogo(conn):
     """Puebla tablas de catálogo con códigos nuevos detectados en la BD (compatible SQLite y PostgreSQL)."""
@@ -114,25 +114,215 @@ def inicializar_y_sincronizar_catalogo(conn):
     cur.close()
 
 
-def obtener_mapa_etiquetas_nodos(conn):
-    df_cat = ejecutar_consulta_df("SELECT codigo_nodo, pais, nombre_nodo FROM dim_catalogo_nodos", conn)
-    mapa = {}
-    for _, r in df_cat.iterrows():
-        cod = limpiar_codigo(r["codigo_nodo"])
-        nom = str(r["nombre_nodo"] or "").strip()
-        pais = str(r["pais"] or "").strip()
-        if nom:
-            mapa[cod] = f"{cod} - {nom} ({pais})"
-        else:
-            mapa[cod] = f"{cod} ({pais})"
-    return mapa
+@st.cache_resource
+def preparar_entorno_bd():
+    """Se ejecuta una sola vez al iniciar el servidor, evitando DDL/DDL-sync en cada clic."""
+    c = obtener_conexion()
+    inicializar_bd(c)
+    inicializar_y_sincronizar_catalogo(c)
+    usa_pg = es_postgres(c)
+    c.close()
+    return usa_pg
 
 
-# Inicializar BD y sincronizar catálogo al arrancar
-conn_init = obtener_conexion()
-inicializar_bd(conn_init)
-inicializar_y_sincronizar_catalogo(conn_init)
-conn_init.close()
+# ==========================================
+# CONSULTAS CACHEADAS PARA VELOCIDAD EN LA WEB
+# ==========================================
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_metadatos_fechas():
+    c = obtener_conexion()
+    try:
+        rango_df = ejecutar_consulta_df(
+            "SELECT MIN(fecha_operacion) AS min_f, MAX(fecha_operacion) AS max_f FROM dim_archivos_cargados",
+            c,
+        )
+        tiene = pd.notna(rango_df["min_f"][0])
+        if not tiene:
+            return False, None, None, []
+        fechas = ejecutar_consulta_df(
+            "SELECT DISTINCT fecha_operacion FROM dim_archivos_cargados ORDER BY fecha_operacion DESC",
+            c,
+        )["fecha_operacion"].tolist()
+        return True, str(rango_df["min_f"][0])[:10], str(rango_df["max_f"][0])[:10], fechas
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_mapa_etiquetas_nodos():
+    c = obtener_conexion()
+    try:
+        df_cat = ejecutar_consulta_df("SELECT codigo_nodo, pais, nombre_nodo FROM dim_catalogo_nodos", c)
+        mapa = {}
+        for _, r in df_cat.iterrows():
+            cod = limpiar_codigo(r["codigo_nodo"])
+            nom = str(r["nombre_nodo"] or "").strip()
+            pais = str(r["pais"] or "").strip()
+            mapa[cod] = f"{cod} - {nom} ({pais})" if nom else f"{cod} ({pais})"
+        return mapa
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_diccionario_agentes_cache():
+    c = obtener_conexion()
+    try:
+        return obtener_diccionario_agentes(c)
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
+    c = obtener_conexion()
+    try:
+        mapa_nodos = cargar_mapa_etiquetas_nodos()
+        df_pex = ejecutar_consulta_df(
+            """
+            SELECT fecha_operacion AS fecha, strftime('%H', fecha_hora) AS hora,
+                   codigo_nodo AS nodo_raw, precio_exante_usd AS precio_usd
+            FROM fact_precios_exante
+            WHERE fecha_operacion BETWEEN ? AND ?
+            """,
+            c,
+            params=[f_ini, f_fin],
+        )
+
+        if not df_pex.empty:
+            df_pex = df_pex.rename(columns={
+                "fecha": "Fecha",
+                "hora": "Hora",
+                "nodo_raw": "Nodo_Raw",
+                "precio_usd": "Precio_USD",
+            })
+            df_pex["Nodo"] = df_pex["Nodo_Raw"].apply(limpiar_codigo)
+            df_pex["Pais"] = df_pex["Nodo"].str[0].map(PREFIJO_PAIS).fillna("OTRO")
+            if pais_cod:
+                df_pex = df_pex[df_pex["Pais"] == pais_cod]
+            df_pex["Etiqueta_Nodo"] = df_pex["Nodo"].map(mapa_nodos).fillna(df_pex["Nodo"])
+
+        params_filtro = [f_ini, f_fin]
+        cond_pais = ""
+        if pais_cod:
+            cond_pais = " AND pais = ?"
+            params_filtro.append(pais_cod)
+
+        df_top_res = ejecutar_consulta_df(
+            f"""
+            SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
+                   SUM(mw_declarada) AS declarada,
+                   SUM(mw_predespachados) AS predespachada
+            FROM fact_oportunidad_top
+            WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+            GROUP BY LOWER(TRIM(tipo_transaccion))
+            """,
+            c,
+            params=params_filtro,
+        )
+
+        df_tcp_res = ejecutar_consulta_df(
+            f"""
+            SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
+                   SUM(mw_declarada) AS declarada,
+                   SUM(mw_predespachados) AS predespachada
+            FROM fact_contratos_tcp
+            WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+            GROUP BY LOWER(TRIM(tipo_transaccion))
+            """,
+            c,
+            params=params_filtro,
+        )
+        return df_pex, df_top_res, df_tcp_res
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_pares_tcp():
+    c = obtener_conexion()
+    try:
+        return ejecutar_consulta_df(
+            """
+            SELECT DISTINCT TRIM(codigo_agente) AS agente_nac,
+                            TRIM(agente_contraparte) AS contraparte
+            FROM fact_contratos_tcp
+            WHERE TRIM(codigo_agente) != '' AND TRIM(agente_contraparte) != ''
+            ORDER BY agente_nac, contraparte
+            """,
+            c,
+        )
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd):
+    c = obtener_conexion()
+    try:
+        return construir_df_mensual_cnd(c, anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd)
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_tablas_horarias_cache(f_ini, f_fin, pais_cod):
+    c = obtener_conexion()
+    try:
+        df_bal = construir_df_balance_horario(c, f_ini, f_fin, pais_cod)
+        df_tcp_ag = construir_df_tcp_agente_contraparte(c, f_ini, f_fin, pais_cod)
+        df_top_ag = construir_df_top_agente_hora(c, f_ini, f_fin, pais_cod)
+        return df_bal, df_tcp_ag, df_top_ag
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_auditoria_cache():
+    c = obtener_conexion()
+    try:
+        df_resumen = ejecutar_consulta_df(
+            """
+            SELECT fecha_operacion AS fecha_operativa,
+                   COUNT(*) AS paises_cargados,
+                   GROUP_CONCAT(pais, ', ') AS lista_paises,
+                   MAX(fecha_carga) AS ultima_actualizacion
+            FROM dim_archivos_cargados
+            GROUP BY fecha_operacion
+            ORDER BY fecha_operacion DESC
+            """,
+            c,
+        ).rename(columns={
+            "fecha_operativa": "Fecha_Operativa",
+            "paises_cargados": "Paises_Cargados",
+            "lista_paises": "Lista_Paises",
+            "ultima_actualizacion": "Ultima_Actualizacion",
+        })
+
+        df_detalle = ejecutar_consulta_df(
+            """
+            SELECT fecha_operacion AS fecha, codigo_osom AS oso, pais AS pais,
+                   archivo_origen AS archivo_vigente, fecha_publicacion_eor AS publicacion_eor,
+                   fecha_carga AS fecha_ingesta
+            FROM dim_archivos_cargados
+            ORDER BY fecha_operacion DESC, codigo_osom
+            """,
+            c,
+        ).rename(columns={
+            "fecha": "Fecha",
+            "oso": "OSO",
+            "pais": "Pais",
+            "archivo_vigente": "Archivo_Vigente",
+            "publicacion_eor": "Publicacion_EOR",
+            "fecha_ingesta": "Fecha_Ingesta",
+        })
+        return df_resumen, df_detalle
+    finally:
+        c.close()
+
+
+# Inicializar entorno una única vez por proceso
+usa_pg = preparar_entorno_bd()
 
 # ==========================================
 # ENCABEZADO Y BARRA LATERAL
@@ -140,26 +330,16 @@ conn_init.close()
 st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
 st.caption("Ingesta de Predespachos (PUB004), Control de Versiones, Catálogo y Reportería Horaria / CND")
 
-conn = obtener_conexion()
-if es_postgres(conn):
+if usa_pg:
     st.sidebar.success(f"☁️ Conectado a Supabase (Esquema `{ESQUEMA_PG}`)")
 else:
     st.sidebar.info("💻 Conectado a SQLite Local")
 
 st.sidebar.header("🔍 Filtros de Consulta")
 
-rango_df = ejecutar_consulta_df(
-    "SELECT MIN(fecha_operacion) AS min_f, MAX(fecha_operacion) AS max_f FROM dim_archivos_cargados",
-    conn,
-)
-tiene_datos = pd.notna(rango_df["min_f"][0])
+tiene_datos, min_f_str, max_f_str, fechas_disp = cargar_metadatos_fechas()
 
 if tiene_datos:
-    fechas_disp = ejecutar_consulta_df(
-        "SELECT DISTINCT fecha_operacion FROM dim_archivos_cargados ORDER BY fecha_operacion DESC",
-        conn,
-    )["fecha_operacion"].tolist()
-
     modo_fecha = st.sidebar.radio(
         "Modo de Selección de Fecha:",
         options=["Un solo día", "Rango de fechas"],
@@ -171,8 +351,8 @@ if tiene_datos:
         f_ini = dia_sel
         f_fin = dia_sel
     else:
-        min_date = datetime.strptime(str(rango_df["min_f"][0])[:10], "%Y-%m-%d").date()
-        max_date = datetime.strptime(str(rango_df["max_f"][0])[:10], "%Y-%m-%d").date()
+        min_date = datetime.strptime(min_f_str, "%Y-%m-%d").date()
+        max_date = datetime.strptime(max_f_str, "%Y-%m-%d").date()
         fechas_sel = st.sidebar.date_input(
             "Rango de Fechas Operativas:",
             value=(min_date, max_date),
@@ -208,63 +388,7 @@ with tab_reportes:
     if not tiene_datos:
         st.warning("No hay registros disponibles para mostrar. Ve a la pestaña 'Ingreso de Archivos (ZIP)'.")
     else:
-        mapa_nodos = obtener_mapa_etiquetas_nodos(conn)
-
-        df_pex = ejecutar_consulta_df(
-            """
-            SELECT fecha_operacion AS fecha, strftime('%H', fecha_hora) AS hora,
-                   codigo_nodo AS nodo_raw, precio_exante_usd AS precio_usd
-            FROM fact_precios_exante
-            WHERE fecha_operacion BETWEEN ? AND ?
-            """,
-            conn,
-            params=[f_ini, f_fin],
-        )
-
-        if not df_pex.empty:
-            df_pex = df_pex.rename(columns={
-                "fecha": "Fecha",
-                "hora": "Hora",
-                "nodo_raw": "Nodo_Raw",
-                "precio_usd": "Precio_USD",
-            })
-            df_pex["Nodo"] = df_pex["Nodo_Raw"].apply(limpiar_codigo)
-            df_pex["Pais"] = df_pex["Nodo"].str[0].map(PREFIJO_PAIS).fillna("OTRO")
-            if pais_cod:
-                df_pex = df_pex[df_pex["Pais"] == pais_cod]
-            df_pex["Etiqueta_Nodo"] = df_pex["Nodo"].map(mapa_nodos).fillna(df_pex["Nodo"])
-
-        params_filtro = [f_ini, f_fin]
-        cond_pais = ""
-        if pais_cod:
-            cond_pais = " AND pais = ?"
-            params_filtro.append(pais_cod)
-
-        df_top_res = ejecutar_consulta_df(
-            f"""
-            SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
-                   SUM(mw_declarada) AS declarada,
-                   SUM(mw_predespachados) AS predespachada
-            FROM fact_oportunidad_top
-            WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
-            GROUP BY LOWER(TRIM(tipo_transaccion))
-            """,
-            conn,
-            params=params_filtro,
-        )
-
-        df_tcp_res = ejecutar_consulta_df(
-            f"""
-            SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
-                   SUM(mw_declarada) AS declarada,
-                   SUM(mw_predespachados) AS predespachada
-            FROM fact_contratos_tcp
-            WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
-            GROUP BY LOWER(TRIM(tipo_transaccion))
-            """,
-            conn,
-            params=params_filtro,
-        )
+        df_pex, df_top_res, df_tcp_res = cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod)
 
         def extraer_val(df, tipo, col):
             fila = df[df["tipo"] == tipo]
@@ -311,21 +435,12 @@ with tab_reportes:
         st.subheader("📄 Reporte Mensual Oficial CND (Impresión PDF con Logo)")
         st.caption("Genera el cuadro diario mensual de energía suministrada por contrato (CF / CNFFF) entre un Agente Nacional y su Contraparte, listo para imprimir en PDF.")
 
-        pares_tcp = ejecutar_consulta_df(
-            """
-            SELECT DISTINCT TRIM(codigo_agente) AS agente_nac,
-                            TRIM(agente_contraparte) AS contraparte
-            FROM fact_contratos_tcp
-            WHERE TRIM(codigo_agente) != '' AND TRIM(agente_contraparte) != ''
-            ORDER BY agente_nac, contraparte
-            """,
-            conn,
-        )
+        pares_tcp = cargar_pares_tcp()
 
         if pares_tcp.empty:
             st.info("Aún no hay registros con Agente Contraparte en `fact_contratos_tcp` para generar el reporte mensual CND.")
         else:
-            mapa_agentes = obtener_diccionario_agentes(conn)
+            mapa_agentes = cargar_diccionario_agentes_cache()
             meses_disponibles = sorted(list({str(f)[:7] for f in fechas_disp}), reverse=True)
 
             col_cnd1, col_cnd2, col_cnd3, col_cnd4 = st.columns([1.1, 1.4, 1.4, 1.1])
@@ -384,8 +499,8 @@ with tab_reportes:
                     key=f"txt_recep_{ag_nac_sel}",
                 )
 
-            df_preview_cnd = construir_df_mensual_cnd(
-                conn, anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd
+            df_preview_cnd = cargar_df_mensual_cnd_cache(
+                anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd
             )
 
             col_prev_tbl, col_prev_acc = st.columns([2.3, 1])
@@ -421,26 +536,35 @@ with tab_reportes:
                     st.info("Tip: Sube el logo como `logo_cnd.png` para incluirlo en la esquina superior izquierda.")
 
                 if st.button("📄 Generar PDF Oficial CND", type="primary", use_container_width=True):
-                    ruta_pdf = generar_pdf_reporte_cnd(
-                        conn=conn,
-                        anio=anio_cnd,
-                        mes=mes_num_cnd,
-                        agente_nacional=ag_nac_sel,
-                        agente_contraparte=cp_sel,
-                        nombre_suministrador=nombre_sumin_pdf,
-                        nombre_receptor=nombre_recep_pdf,
-                        tipo_transaccion=tipo_tr_cnd,
-                        ruta_logo="logo_cnd.png",
-                    )
+                    c_pdf = obtener_conexion()
+                    try:
+                        ruta_pdf = generar_pdf_reporte_cnd(
+                            conn=c_pdf,
+                            anio=anio_cnd,
+                            mes=mes_num_cnd,
+                            agente_nacional=ag_nac_sel,
+                            agente_contraparte=cp_sel,
+                            nombre_suministrador=nombre_sumin_pdf,
+                            nombre_receptor=nombre_recep_pdf,
+                            tipo_transaccion=tipo_tr_cnd,
+                            ruta_logo="logo_cnd.png",
+                        )
+                    finally:
+                        c_pdf.close()
+
                     if os.path.exists(ruta_pdf):
                         with open(ruta_pdf, "rb") as f_pdf:
-                            st.download_button(
-                                label=f"⬇️ Descargar {os.path.basename(ruta_pdf)}",
-                                data=f_pdf.read(),
-                                file_name=os.path.basename(ruta_pdf),
-                                mime="application/pdf",
-                                use_container_width=True,
-                            )
+                            st.session_state["pdf_cnd_bytes"] = f_pdf.read()
+                            st.session_state["pdf_cnd_nombre"] = os.path.basename(ruta_pdf)
+
+                if "pdf_cnd_bytes" in st.session_state:
+                    st.download_button(
+                        label=f"⬇️ Descargar {st.session_state['pdf_cnd_nombre']}",
+                        data=st.session_state["pdf_cnd_bytes"],
+                        file_name=st.session_state["pdf_cnd_nombre"],
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
 
         st.divider()
 
@@ -448,7 +572,7 @@ with tab_reportes:
         # TABLA 1: BALANCE HORARIO DE RETIROS E INYECCIONES (3 DECIMALES)
         # ==========================================
         st.subheader(f"📋 Balance Horario de Transacciones ({pais_cod or 'REGIONAL MER'})")
-        df_bal_web = construir_df_balance_horario(conn, f_ini, f_fin, pais_cod)
+        df_bal_web, df_tcp_ag, df_top_ag = cargar_tablas_horarias_cache(f_ini, f_fin, pais_cod)
 
         df_tabla_web = pd.DataFrame({
             "FECHA": df_bal_web["fecha"].apply(formatear_fecha_corta_es),
@@ -483,13 +607,18 @@ with tab_reportes:
         col_cv1, col_cv2 = st.columns([1.2, 2.8])
         with col_cv1:
             if st.button("📄 Generar PDF Compra y Venta Regional", type="primary", use_container_width=True, key="btn_pdf_compra_venta"):
-                ruta_pdf_cv = generar_pdf_informe_compra_venta(
-                    conn=conn,
-                    fecha_inicio=f_ini,
-                    fecha_fin=f_fin,
-                    pais_filtro=pais_cod,
-                    ruta_logo="logo_cnd.png",
-                )
+                c_cv = obtener_conexion()
+                try:
+                    ruta_pdf_cv = generar_pdf_informe_compra_venta(
+                        conn=c_cv,
+                        fecha_inicio=f_ini,
+                        fecha_fin=f_fin,
+                        pais_filtro=pais_cod,
+                        ruta_logo="logo_cnd.png",
+                    )
+                finally:
+                    c_cv.close()
+
                 if os.path.exists(ruta_pdf_cv):
                     with open(ruta_pdf_cv, "rb") as f_cv:
                         st.session_state["pdf_cv_bytes"] = f_cv.read()
@@ -517,7 +646,6 @@ with tab_reportes:
         ])
 
         with tab_ag_tcp_hora:
-            df_tcp_ag = construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod)
             if not df_tcp_ag.empty:
                 f_col1, f_col2, f_col3 = st.columns(3)
                 with f_col1:
@@ -572,7 +700,6 @@ with tab_reportes:
                 st.info("No hay registros de contratos (TCP) para la fecha y país seleccionados.")
 
         with tab_ag_top_hora:
-            df_top_ag = construir_df_top_agente_hora(conn, f_ini, f_fin, pais_cod)
             if not df_top_ag.empty:
                 t_col1, t_col2 = st.columns(2)
                 with t_col1:
@@ -703,13 +830,18 @@ with tab_reportes:
                     archivo_xlsx = exportar_reporte_mer(fecha_inicio=f_ini, fecha_fin=f_fin, pais_filtro=pais_cod)
                     if os.path.exists(archivo_xlsx):
                         with open(archivo_xlsx, "rb") as f_excel:
-                            st.download_button(
-                                label=f"⬇️ Descargar {archivo_xlsx}",
-                                data=f_excel.read(),
-                                file_name=archivo_xlsx,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                            )
+                            st.session_state["xlsx_bytes"] = f_excel.read()
+                            st.session_state["xlsx_nombre"] = archivo_xlsx
+
+        with col_btn2:
+            if "xlsx_bytes" in st.session_state:
+                st.download_button(
+                    label=f"⬇️ Descargar {st.session_state['xlsx_nombre']}",
+                    data=st.session_state["xlsx_bytes"],
+                    file_name=st.session_state["xlsx_nombre"],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
 # ------------------------------------------
 # PESTAÑA 2: CATÁLOGO EDITABLE DE NODOS Y AGENTES
@@ -731,13 +863,17 @@ with tab_catalogo:
             index=1 if pais_cod == "HN" else 0,
             key="cat_pais_nodos",
         )
-        q_nodos = "SELECT codigo_nodo, pais, nombre_nodo, subestacion, nivel_kv FROM dim_catalogo_nodos"
-        p_nodos = []
-        if filtro_pais_cat != "TODOS":
-            q_nodos += " WHERE pais = ?"
-            p_nodos.append(filtro_pais_cat)
-        q_nodos += " ORDER BY codigo_nodo"
-        df_nodos_cat = ejecutar_consulta_df(q_nodos, conn, params=p_nodos)
+        c_cat_n = obtener_conexion()
+        try:
+            q_nodos = "SELECT codigo_nodo, pais, nombre_nodo, subestacion, nivel_kv FROM dim_catalogo_nodos"
+            p_nodos = []
+            if filtro_pais_cat != "TODOS":
+                q_nodos += " WHERE pais = ?"
+                p_nodos.append(filtro_pais_cat)
+            q_nodos += " ORDER BY codigo_nodo"
+            df_nodos_cat = ejecutar_consulta_df(q_nodos, c_cat_n, params=p_nodos)
+        finally:
+            c_cat_n.close()
 
         edited_nodos = st.data_editor(
             df_nodos_cat,
@@ -755,7 +891,8 @@ with tab_catalogo:
         )
 
         if st.button("💾 Guardar Cambios en Nodos", type="primary"):
-            cur = conn.cursor()
+            c_save_n = obtener_conexion()
+            cur = c_save_n.cursor()
             for _, row in edited_nodos.iterrows():
                 ejecutar_sql(
                     cur,
@@ -766,16 +903,23 @@ with tab_catalogo:
                     """,
                     (row["nombre_nodo"] or "", row["subestacion"] or "", row["nivel_kv"] or "", row["codigo_nodo"]),
                 )
-            conn.commit()
+            c_save_n.commit()
             cur.close()
+            c_save_n.close()
+            st.cache_data.clear()
             st.success("✅ Catálogo de nodos actualizado correctamente.")
             st.rerun()
 
     with subtab_agentes:
-        df_agentes_cat = ejecutar_consulta_df(
-            "SELECT codigo_agente, pais, nombre_agente, tipo_agente FROM dim_catalogo_agentes ORDER BY pais, codigo_agente",
-            conn,
-        )
+        c_cat_a = obtener_conexion()
+        try:
+            df_agentes_cat = ejecutar_consulta_df(
+                "SELECT codigo_agente, pais, nombre_agente, tipo_agente FROM dim_catalogo_agentes ORDER BY pais, codigo_agente",
+                c_cat_a,
+            )
+        finally:
+            c_cat_a.close()
+
         edited_agentes = st.data_editor(
             df_agentes_cat,
             use_container_width=True,
@@ -791,7 +935,8 @@ with tab_catalogo:
         )
 
         if st.button("💾 Guardar Cambios en Agentes", type="primary"):
-            cur = conn.cursor()
+            c_save_a = obtener_conexion()
+            cur = c_save_a.cursor()
             for _, row in edited_agentes.iterrows():
                 ejecutar_sql(
                     cur,
@@ -802,17 +947,23 @@ with tab_catalogo:
                     """,
                     (row["nombre_agente"] or "", row["tipo_agente"] or "", row["codigo_agente"]),
                 )
-            conn.commit()
+            c_save_a.commit()
             cur.close()
+            c_save_a.close()
+            st.cache_data.clear()
             st.success("✅ Catálogo de agentes actualizado correctamente.")
             st.rerun()
 
     with subtab_excel_cat:
         st.markdown("Descarga el catálogo actual a Excel, completa los nombres cómodamente y vuelve a subirlo.")
-        buffer_cat = io.BytesIO()
-        with pd.ExcelWriter(buffer_cat, engine="openpyxl") as writer:
-            ejecutar_consulta_df("SELECT * FROM dim_catalogo_nodos ORDER BY codigo_nodo", conn).to_excel(writer, sheet_name="Nodos", index=False)
-            ejecutar_consulta_df("SELECT * FROM dim_catalogo_agentes ORDER BY pais, codigo_agente", conn).to_excel(writer, sheet_name="Agentes", index=False)
+        c_xl_cat = obtener_conexion()
+        try:
+            buffer_cat = io.BytesIO()
+            with pd.ExcelWriter(buffer_cat, engine="openpyxl") as writer:
+                ejecutar_consulta_df("SELECT * FROM dim_catalogo_nodos ORDER BY codigo_nodo", c_xl_cat).to_excel(writer, sheet_name="Nodos", index=False)
+                ejecutar_consulta_df("SELECT * FROM dim_catalogo_agentes ORDER BY pais, codigo_agente", c_xl_cat).to_excel(writer, sheet_name="Agentes", index=False)
+        finally:
+            c_xl_cat.close()
 
         st.download_button(
             label="⬇️ Descargar Plantilla_Catalogo_MER.xlsx",
@@ -824,7 +975,8 @@ with tab_catalogo:
         archivo_cat_up = st.file_uploader("Subir Plantilla_Catalogo_MER.xlsx completada", type=["xlsx"])
         if archivo_cat_up and st.button("⬆️ Actualizar Catálogo desde Excel"):
             xl_cat = pd.ExcelFile(archivo_cat_up)
-            cur = conn.cursor()
+            c_up_cat = obtener_conexion()
+            cur = c_up_cat.cursor()
             if "Nodos" in xl_cat.sheet_names:
                 df_n_up = pd.read_excel(xl_cat, sheet_name="Nodos").fillna("")
                 for _, r in df_n_up.iterrows():
@@ -854,8 +1006,10 @@ with tab_catalogo:
                         """,
                         (limpiar_codigo(r["codigo_agente"]), str(r["pais"]).strip(), str(r["nombre_agente"]).strip(), str(r["tipo_agente"]).strip()),
                     )
-            conn.commit()
+            c_up_cat.commit()
             cur.close()
+            c_up_cat.close()
+            st.cache_data.clear()
             st.success("✅ Catálogo importado exitosamente desde Excel.")
             st.rerun()
 
@@ -891,8 +1045,11 @@ with tab_ingesta:
                     with contextlib.redirect_stdout(log_buffer):
                         procesar_carpeta(tmpdir)
 
-                inicializar_y_sincronizar_catalogo(conn)
+                c_sync = obtener_conexion()
+                inicializar_y_sincronizar_catalogo(c_sync)
+                c_sync.close()
 
+            st.cache_data.clear()
             salida_proceso = log_buffer.getvalue().strip()
             st.success("✅ ¡Sincronización completada y catálogo actualizado!")
             if salida_proceso:
@@ -906,45 +1063,10 @@ with tab_ingesta:
 with tab_auditoria:
     st.subheader("Estado Actual de la Base de Datos Histórica")
     if tiene_datos:
-        df_resumen_dias = ejecutar_consulta_df(
-            """
-            SELECT fecha_operacion AS fecha_operativa,
-                   COUNT(*) AS paises_cargados,
-                   GROUP_CONCAT(pais, ', ') AS lista_paises,
-                   MAX(fecha_carga) AS ultima_actualizacion
-            FROM dim_archivos_cargados
-            GROUP BY fecha_operacion
-            ORDER BY fecha_operacion DESC
-            """,
-            conn,
-        ).rename(columns={
-            "fecha_operativa": "Fecha_Operativa",
-            "paises_cargados": "Paises_Cargados",
-            "lista_paises": "Lista_Paises",
-            "ultima_actualizacion": "Ultima_Actualizacion",
-        })
+        df_resumen_dias, df_detalle = cargar_auditoria_cache()
         st.dataframe(df_resumen_dias, use_container_width=True, hide_index=True)
 
         st.markdown("#### Detalle de Archivos Oficiales Vigentes")
-        df_detalle = ejecutar_consulta_df(
-            """
-            SELECT fecha_operacion AS fecha, codigo_osom AS oso, pais AS pais,
-                   archivo_origen AS archivo_vigente, fecha_publicacion_eor AS publicacion_eor,
-                   fecha_carga AS fecha_ingesta
-            FROM dim_archivos_cargados
-            ORDER BY fecha_operacion DESC, codigo_osom
-            """,
-            conn,
-        ).rename(columns={
-            "fecha": "Fecha",
-            "oso": "OSO",
-            "pais": "Pais",
-            "archivo_vigente": "Archivo_Vigente",
-            "publicacion_eor": "Publicacion_EOR",
-            "fecha_ingesta": "Fecha_Ingesta",
-        })
         st.dataframe(df_detalle, use_container_width=True, hide_index=True)
     else:
         st.info("No hay archivos registrados en la auditoría todavía.")
-
-conn.close()
