@@ -436,7 +436,7 @@ with tab_reportes:
                         with open(ruta_pdf, "rb") as f_pdf:
                             st.download_button(
                                 label=f"⬇️ Descargar {os.path.basename(ruta_pdf)}",
-                                data=f_pdf,
+                                data=f_pdf.read(),
                                 file_name=os.path.basename(ruta_pdf),
                                 mime="application/pdf",
                                 use_container_width=True,
@@ -480,23 +480,30 @@ with tab_reportes:
             hide_index=True,
         )
 
-        if st.button("📄 Generar PDF Compra y Venta Regional", key="btn_pdf_compra_venta"):
-            ruta_pdf_cv = generar_pdf_informe_compra_venta(
-                conn=conn,
-                fecha_inicio=f_ini,
-                fecha_fin=f_fin,
-                pais_filtro=pais_cod,
-                ruta_logo="logo_cnd.png",
-            )
-            if os.path.exists(ruta_pdf_cv):
-                with open(ruta_pdf_cv, "rb") as f_cv:
-                    st.download_button(
-                        label=f"⬇️ Descargar {os.path.basename(ruta_pdf_cv)}",
-                        data=f_cv,
-                        file_name=os.path.basename(ruta_pdf_cv),
-                        mime="application/pdf",
-                        key="dl_pdf_compra_venta",
-                    )
+        col_cv1, col_cv2 = st.columns([1.2, 2.8])
+        with col_cv1:
+            if st.button("📄 Generar PDF Compra y Venta Regional", type="primary", use_container_width=True, key="btn_pdf_compra_venta"):
+                ruta_pdf_cv = generar_pdf_informe_compra_venta(
+                    conn=conn,
+                    fecha_inicio=f_ini,
+                    fecha_fin=f_fin,
+                    pais_filtro=pais_cod,
+                    ruta_logo="logo_cnd.png",
+                )
+                if os.path.exists(ruta_pdf_cv):
+                    with open(ruta_pdf_cv, "rb") as f_cv:
+                        st.session_state["pdf_cv_bytes"] = f_cv.read()
+                        st.session_state["pdf_cv_nombre"] = os.path.basename(ruta_pdf_cv)
+
+        with col_cv2:
+            if "pdf_cv_bytes" in st.session_state:
+                st.download_button(
+                    label=f"⬇️ Descargar {st.session_state['pdf_cv_nombre']}",
+                    data=st.session_state["pdf_cv_bytes"],
+                    file_name=st.session_state["pdf_cv_nombre"],
+                    mime="application/pdf",
+                    key="dl_pdf_compra_venta",
+                )
 
         st.divider()
 
@@ -698,7 +705,7 @@ with tab_reportes:
                         with open(archivo_xlsx, "rb") as f_excel:
                             st.download_button(
                                 label=f"⬇️ Descargar {archivo_xlsx}",
-                                data=f_excel,
+                                data=f_excel.read(),
                                 file_name=archivo_xlsx,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True,
@@ -937,3 +944,7 @@ with tab_auditoria:
             "fecha_ingesta": "Fecha_Ingesta",
         })
         st.dataframe(df_detalle, use_container_width=True, hide_index=True)
+    else:
+        st.info("No hay archivos registrados en la auditoría todavía.")
+
+conn.close()
