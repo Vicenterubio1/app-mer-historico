@@ -21,6 +21,7 @@ from consultar_mer import (
     construir_df_top_agente_hora,
     construir_df_mensual_cnd,
     generar_pdf_reporte_cnd,
+    generar_pdf_informe_compra_venta,
     obtener_diccionario_agentes,
     formatear_fecha_corta_es,
     PREFIJO_PAIS,
@@ -479,6 +480,24 @@ with tab_reportes:
             hide_index=True,
         )
 
+        if st.button("📄 Generar PDF Compra y Venta Regional", key="btn_pdf_compra_venta"):
+            ruta_pdf_cv = generar_pdf_informe_compra_venta(
+                conn=conn,
+                fecha_inicio=f_ini,
+                fecha_fin=f_fin,
+                pais_filtro=pais_cod,
+                ruta_logo="logo_cnd.png",
+            )
+            if os.path.exists(ruta_pdf_cv):
+                with open(ruta_pdf_cv, "rb") as f_cv:
+                    st.download_button(
+                        label=f"⬇️ Descargar {os.path.basename(ruta_pdf_cv)}",
+                        data=f_cv,
+                        file_name=os.path.basename(ruta_pdf_cv),
+                        mime="application/pdf",
+                        key="dl_pdf_compra_venta",
+                    )
+
         st.divider()
 
         # ==========================================
@@ -840,9 +859,9 @@ with tab_ingesta:
     st.subheader("Cargar Predespachos Regionales (PUB004-*.zip)")
     st.markdown("""
     Arrastra aquí los archivos `.zip` descargados del EOR. El sistema detectará automáticamente:
-    - **Nuevos días operativos** (`[NUEVO]`)
-    - **Modificaciones o redespachos** publicados más tarde (`[UPDATE]`), reemplazando las versiones obsoletas.
-    - **Archivos ya existentes o más antiguos** (`[SKIP]`), omitiéndolos para proteger las versiones vigentes.
+- **Nuevos días operativos** (`[NUEVO]`)
+- **Modificaciones o redespachos** publicados más tarde (`[UPDATE]`), reemplazando las versiones obsoletas.
+- **Archivos ya existentes o más antiguos** (`[SKIP]`), omitiéndolos para proteger las versiones vigentes.
     """)
 
     archivos_subidos = st.file_uploader(
@@ -918,7 +937,3 @@ with tab_auditoria:
             "fecha_ingesta": "Fecha_Ingesta",
         })
         st.dataframe(df_detalle, use_container_width=True, hide_index=True)
-    else:
-        st.info("La base de datos está vacía.")
-
-conn.close()
