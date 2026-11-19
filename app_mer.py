@@ -39,11 +39,20 @@ def limpiar_codigo(val):
     return s
 
 
+def asegurar_esquema(conn):
+    """Garantiza que PostgreSQL apunte al esquema configurado (mer) en cada conexión."""
+    if es_postgres(conn):
+        cur_sp = conn.cursor()
+        cur_sp.execute(f"SET search_path TO {ESQUEMA_PG}, public")
+        cur_sp.close()
+
+
 # ==========================================
 # FUNCIONES DE CATÁLOGO MAESTRO E INICIALIZACIÓN
 # ==========================================
 def inicializar_y_sincronizar_catalogo(conn):
     """Puebla tablas de catálogo con códigos nuevos detectados en la BD (compatible SQLite y PostgreSQL)."""
+    asegurar_esquema(conn)
     cur = conn.cursor()
     ejecutar_sql(
         cur,
@@ -116,22 +125,25 @@ def inicializar_y_sincronizar_catalogo(conn):
 
 @st.cache_resource
 def preparar_entorno_bd():
-    """Se ejecuta una sola vez al iniciar el servidor, evitando DDL/DDL-sync en cada clic."""
+    """Se ejecuta una sola vez al iniciar el servidor, evitando DDL en cada clic."""
     c = obtener_conexion()
-    inicializar_bd(c)
-    inicializar_y_sincronizar_catalogo(c)
-    usa_pg = es_postgres(c)
-    c.close()
-    return usa_pg
+    try:
+        asegurar_esquema(c)
+        inicializar_bd(c)
+        inicializar_y_sincronizar_catalogo(c)
+        return es_postgres(c)
+    finally:
+        c.close()
 
 
 # ==========================================
-# CONSULTAS CACHEADAS PARA VELOCIDAD EN LA WEB
+# CONSULTAS CACHEADAS BLINDADAS
 # ==========================================
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_metadatos_fechas():
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         rango_df = ejecutar_consulta_df(
             "SELECT MIN(fecha_operacion) AS min_f, MAX(fecha_operacion) AS max_f FROM dim_archivos_cargados",
             c,
@@ -144,6 +156,8 @@ def cargar_metadatos_fechas():
             c,
         )["fecha_operacion"].tolist()
         return True, str(rango_df["min_f"][0])[:10], str(rango_df["max_f"][0])[:10], fechas
+    except Exception:
+        return False, None, None, []
     finally:
         c.close()
 
@@ -152,6 +166,7 @@ def cargar_metadatos_fechas():
 def cargar_mapa_etiquetas_nodos():
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         df_cat = ejecutar_consulta_df("SELECT codigo_nodo, pais, nombre_nodo FROM dim_catalogo_nodos", c)
         mapa = {}
         for _, r in df_cat.iterrows():
@@ -160,6 +175,8 @@ def cargar_mapa_etiquetas_nodos():
             pais = str(r["pais"] or "").strip()
             mapa[cod] = f"{cod} - {nom} ({pais})" if nom else f"{cod} ({pais})"
         return mapa
+    except Exception:
+        return {}
     finally:
         c.close()
 
@@ -168,7 +185,10 @@ def cargar_mapa_etiquetas_nodos():
 def cargar_diccionario_agentes_cache():
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         return obtener_diccionario_agentes(c)
+    except Exception:
+        return {}
     finally:
         c.close()
 
@@ -177,6 +197,7 @@ def cargar_diccionario_agentes_cache():
 def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         mapa_nodos = cargar_mapa_etiquetas_nodos()
         df_pex = ejecutar_consulta_df(
             """
@@ -233,7 +254,9 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
             c,
             params=params_filtro,
         )
-        return df_pex, df_top_res, df_tcp_res
+        return df_pex, df_top_res, df_tcp_res, None
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), str(e)
     finally:
         c.close()
 
@@ -242,6 +265,7 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
 def cargar_pares_tcp():
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         return ejecutar_consulta_df(
             """
             SELECT DISTINCT TRIM(codigo_agente) AS agente_nac,
@@ -252,6 +276,8 @@ def cargar_pares_tcp():
             """,
             c,
         )
+    except Exception:
+        return pd.DataFrame()
     finally:
         c.close()
 
@@ -260,6 +286,7 @@ def cargar_pares_tcp():
 def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd):
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         return construir_df_mensual_cnd(c, anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd)
     finally:
         c.close()
@@ -269,6 +296,7 @@ def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_
 def cargar_tablas_horarias_cache(f_ini, f_fin, pais_cod):
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         df_bal = construir_df_balance_horario(c, f_ini, f_fin, pais_cod)
         df_tcp_ag = construir_df_tcp_agente_contraparte(c, f_ini, f_fin, pais_cod)
         df_top_ag = construir_df_top_agente_hora(c, f_ini, f_fin, pais_cod)
@@ -281,6 +309,7 @@ def cargar_tablas_horarias_cache(f_ini, f_fin, pais_cod):
 def cargar_auditoria_cache():
     c = obtener_conexion()
     try:
+        asegurar_esquema(c)
         df_resumen = ejecutar_consulta_df(
             """
             SELECT fecha_operacion AS fecha_operativa,
@@ -317,6 +346,8 @@ def cargar_auditoria_cache():
             "fecha_ingesta": "Fecha_Ingesta",
         })
         return df_resumen, df_detalle
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
     finally:
         c.close()
 
@@ -388,9 +419,13 @@ with tab_reportes:
     if not tiene_datos:
         st.warning("No hay registros disponibles para mostrar. Ve a la pestaña 'Ingreso de Archivos (ZIP)'.")
     else:
-        df_pex, df_top_res, df_tcp_res = cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod)
+        df_pex, df_top_res, df_tcp_res, err_ind = cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod)
+        if err_ind:
+            st.warning(f"Aviso al consultar indicadores ({f_ini}): {err_ind}")
 
         def extraer_val(df, tipo, col):
+            if df.empty or "tipo" not in df.columns:
+                return 0.0
             fila = df[df["tipo"] == tipo]
             return float(fila[col].iloc[0]) if not fila.empty and pd.notna(fila[col].iloc[0]) else 0.0
 
@@ -538,6 +573,7 @@ with tab_reportes:
                 if st.button("📄 Generar PDF Oficial CND", type="primary", use_container_width=True):
                     c_pdf = obtener_conexion()
                     try:
+                        asegurar_esquema(c_pdf)
                         ruta_pdf = generar_pdf_reporte_cnd(
                             conn=c_pdf,
                             anio=anio_cnd,
@@ -609,6 +645,7 @@ with tab_reportes:
             if st.button("📄 Generar PDF Compra y Venta Regional", type="primary", use_container_width=True, key="btn_pdf_compra_venta"):
                 c_cv = obtener_conexion()
                 try:
+                    asegurar_esquema(c_cv)
                     ruta_pdf_cv = generar_pdf_informe_compra_venta(
                         conn=c_cv,
                         fecha_inicio=f_ini,
@@ -865,6 +902,7 @@ with tab_catalogo:
         )
         c_cat_n = obtener_conexion()
         try:
+            asegurar_esquema(c_cat_n)
             q_nodos = "SELECT codigo_nodo, pais, nombre_nodo, subestacion, nivel_kv FROM dim_catalogo_nodos"
             p_nodos = []
             if filtro_pais_cat != "TODOS":
@@ -892,6 +930,7 @@ with tab_catalogo:
 
         if st.button("💾 Guardar Cambios en Nodos", type="primary"):
             c_save_n = obtener_conexion()
+            asegurar_esquema(c_save_n)
             cur = c_save_n.cursor()
             for _, row in edited_nodos.iterrows():
                 ejecutar_sql(
@@ -913,6 +952,7 @@ with tab_catalogo:
     with subtab_agentes:
         c_cat_a = obtener_conexion()
         try:
+            asegurar_esquema(c_cat_a)
             df_agentes_cat = ejecutar_consulta_df(
                 "SELECT codigo_agente, pais, nombre_agente, tipo_agente FROM dim_catalogo_agentes ORDER BY pais, codigo_agente",
                 c_cat_a,
@@ -936,6 +976,7 @@ with tab_catalogo:
 
         if st.button("💾 Guardar Cambios en Agentes", type="primary"):
             c_save_a = obtener_conexion()
+            asegurar_esquema(c_save_a)
             cur = c_save_a.cursor()
             for _, row in edited_agentes.iterrows():
                 ejecutar_sql(
@@ -958,6 +999,7 @@ with tab_catalogo:
         st.markdown("Descarga el catálogo actual a Excel, completa los nombres cómodamente y vuelve a subirlo.")
         c_xl_cat = obtener_conexion()
         try:
+            asegurar_esquema(c_xl_cat)
             buffer_cat = io.BytesIO()
             with pd.ExcelWriter(buffer_cat, engine="openpyxl") as writer:
                 ejecutar_consulta_df("SELECT * FROM dim_catalogo_nodos ORDER BY codigo_nodo", c_xl_cat).to_excel(writer, sheet_name="Nodos", index=False)
@@ -976,6 +1018,7 @@ with tab_catalogo:
         if archivo_cat_up and st.button("⬆️ Actualizar Catálogo desde Excel"):
             xl_cat = pd.ExcelFile(archivo_cat_up)
             c_up_cat = obtener_conexion()
+            asegurar_esquema(c_up_cat)
             cur = c_up_cat.cursor()
             if "Nodos" in xl_cat.sheet_names:
                 df_n_up = pd.read_excel(xl_cat, sheet_name="Nodos").fillna("")
