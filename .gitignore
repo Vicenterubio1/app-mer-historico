@@ -1,0 +1,8 @@
+historico_mer.db
+migrar_a_supabase.py
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+varios/
+*.pdf
