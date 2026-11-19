@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import io
+import hmac
 import tempfile
 import contextlib
 from datetime import datetime
@@ -45,6 +46,67 @@ def asegurar_esquema(conn):
         cur_sp = conn.cursor()
         cur_sp.execute(f"SET search_path TO {ESQUEMA_PG}, public")
         cur_sp.close()
+
+
+# ==========================================
+# CONTROL DE ACCESO TOTAL (st.secrets)
+# ==========================================
+def obtener_secreto(nombre_clave):
+    try:
+        if nombre_clave in st.secrets:
+            return str(st.secrets[nombre_clave]).strip()
+    except Exception:
+        pass
+    return os.environ.get(nombre_clave, "").strip()
+
+
+def verificar_clave(clave_ingresada, clave_real):
+    if not clave_real:
+        return False
+    return hmac.compare_digest(str(clave_ingresada), str(clave_real))
+
+
+if "rol_usuario" not in st.session_state:
+    st.session_state["rol_usuario"] = None  # None | "visitante" | "admin"
+
+
+def pantalla_login():
+    clave_admin = obtener_secreto("ADMIN_PASSWORD")
+    clave_visitante = obtener_secreto("VISITOR_PASSWORD")
+
+    # Si no se han configurado secretos en el entorno, permite acceso local sin bloqueo
+    if not clave_admin and not clave_visitante:
+        st.session_state["rol_usuario"] = "admin"
+        return True
+
+    if st.session_state["rol_usuario"] in ("visitante", "admin"):
+        return True
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_izq, col_centro, col_der = st.columns([1, 1.4, 1])
+    with col_centro:
+        st.title("⚡ Sistema Histórico MER")
+        st.caption("Mercado Eléctrico Regional · Acceso Restringido")
+        with st.form("form_login_general", clear_on_submit=True):
+            pwd = st.text_input("Contraseña de acceso:", type="password", placeholder="Ingresa tu contraseña...")
+            ingresar = st.form_submit_button("🔓 Ingresar al Sistema", type="primary", use_container_width=True)
+            if ingresar:
+                if verificar_clave(pwd, clave_admin):
+                    st.session_state["rol_usuario"] = "admin"
+                    st.rerun()
+                elif verificar_clave(pwd, clave_visitante):
+                    st.session_state["rol_usuario"] = "visitante"
+                    st.rerun()
+                else:
+                    st.error("Contraseña incorrecta. Verifica tus credenciales.")
+    return False
+
+
+# Detiene toda ejecución y consulta a BD si el usuario no ha iniciado sesión
+if not pantalla_login():
+    st.stop()
+
+es_admin = st.session_state["rol_usuario"] == "admin"
 
 
 # ==========================================
@@ -370,6 +432,13 @@ if usa_pg:
 else:
     st.sidebar.info("💻 Conectado a SQLite Local")
 
+# Estado de sesión y cierre de sesión en la barra lateral
+rol_etiqueta = "Administrador (Lectura y Escritura)" if es_admin else "Visitante (Solo Consulta)"
+st.sidebar.caption(f"👤 Perfil activo: **{rol_etiqueta}**")
+if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
+    st.session_state["rol_usuario"] = None
+    st.rerun()
+
 st.sidebar.header("🔍 Filtros de Consulta")
 
 tiene_datos, min_f_str, max_f_str, fechas_disp = cargar_metadatos_fechas()
@@ -403,7 +472,7 @@ if tiene_datos:
     )
     pais_cod = None if pais_opcion.startswith("TODOS") else pais_opcion.split(" - ")[0]
 else:
-    st.sidebar.info("Aún no hay datos cargados. Sube tus primeros archivos ZIP en la pestaña 'Ingreso de Archivos'.")
+    st.sidebar.info("Aún no hay datos cargados.")
     f_ini, f_fin, pais_cod = None, None, None
 
 # ==========================================
@@ -421,7 +490,7 @@ tab_reportes, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
 # ------------------------------------------
 with tab_reportes:
     if not tiene_datos:
-        st.warning("No hay registros disponibles para mostrar. Ve a la pestaña 'Ingreso de Archivos (ZIP)'.")
+        st.warning("No hay registros disponibles para mostrar.")
     else:
         df_pex, df_top_res, df_tcp_res, err_ind = cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod)
         if err_ind:
@@ -889,7 +958,10 @@ with tab_reportes:
 # ------------------------------------------
 with tab_catalogo:
     st.subheader("🏷️ Administración de Nombres Reales (Nodos y Agentes)")
-    st.markdown("Los códigos se detectan automáticamente de tus archivos `PUB004` (incluyendo los Agentes Contraparte). Edita los nombres aquí para que aparezcan automáticamente en los reportes y títulos de PDF.")
+    st.markdown("Los códigos se detectan automáticamente de tus archivos `PUB004` (incluyendo los Agentes Contraparte).")
+
+    if not es_admin:
+        st.info("🔒 Tu sesión es de **Visitante (Solo Consulta)**. Inicia sesión con contraseña de Administrador para editar nombres o importar desde Excel.")
 
     subtab_nodos, subtab_agentes, subtab_excel_cat = st.tabs([
         "🔌 Catálogo de Nodos Eléctricos",
@@ -917,41 +989,44 @@ with tab_catalogo:
         finally:
             c_cat_n.close()
 
-        edited_nodos = st.data_editor(
-            df_nodos_cat,
-            use_container_width=True,
-            hide_index=True,
-            disabled=["codigo_nodo", "pais"],
-            column_config={
-                "codigo_nodo": st.column_config.TextColumn("Código Nodo EOR"),
-                "pais": st.column_config.TextColumn("País"),
-                "nombre_nodo": st.column_config.TextColumn("Nombre Descriptivo (Ej. Amarateca 230kV)", width="large"),
-                "subestacion": st.column_config.TextColumn("Subestación"),
-                "nivel_kv": st.column_config.TextColumn("Tensión (kV)"),
-            },
-            key="editor_nodos",
-        )
+        if es_admin:
+            edited_nodos = st.data_editor(
+                df_nodos_cat,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["codigo_nodo", "pais"],
+                column_config={
+                    "codigo_nodo": st.column_config.TextColumn("Código Nodo EOR"),
+                    "pais": st.column_config.TextColumn("País"),
+                    "nombre_nodo": st.column_config.TextColumn("Nombre Descriptivo (Ej. Amarateca 230kV)", width="large"),
+                    "subestacion": st.column_config.TextColumn("Subestación"),
+                    "nivel_kv": st.column_config.TextColumn("Tensión (kV)"),
+                },
+                key="editor_nodos",
+            )
 
-        if st.button("💾 Guardar Cambios en Nodos", type="primary"):
-            c_save_n = obtener_conexion()
-            asegurar_esquema(c_save_n)
-            cur = c_save_n.cursor()
-            for _, row in edited_nodos.iterrows():
-                ejecutar_sql(
-                    cur,
-                    """
-                    UPDATE dim_catalogo_nodos
-                    SET nombre_nodo = ?, subestacion = ?, nivel_kv = ?
-                    WHERE codigo_nodo = ?
-                    """,
-                    (row["nombre_nodo"] or "", row["subestacion"] or "", row["nivel_kv"] or "", row["codigo_nodo"]),
-                )
-            c_save_n.commit()
-            cur.close()
-            c_save_n.close()
-            st.cache_data.clear()
-            st.success("✅ Catálogo de nodos actualizado correctamente.")
-            st.rerun()
+            if st.button("💾 Guardar Cambios en Nodos", type="primary"):
+                c_save_n = obtener_conexion()
+                asegurar_esquema(c_save_n)
+                cur = c_save_n.cursor()
+                for _, row in edited_nodos.iterrows():
+                    ejecutar_sql(
+                        cur,
+                        """
+                        UPDATE dim_catalogo_nodos
+                        SET nombre_nodo = ?, subestacion = ?, nivel_kv = ?
+                        WHERE codigo_nodo = ?
+                        """,
+                        (row["nombre_nodo"] or "", row["subestacion"] or "", row["nivel_kv"] or "", row["codigo_nodo"]),
+                    )
+                c_save_n.commit()
+                cur.close()
+                c_save_n.close()
+                st.cache_data.clear()
+                st.success("✅ Catálogo de nodos actualizado correctamente.")
+                st.rerun()
+        else:
+            st.dataframe(df_nodos_cat, use_container_width=True, hide_index=True)
 
     with subtab_agentes:
         c_cat_a = obtener_conexion()
@@ -964,43 +1039,46 @@ with tab_catalogo:
         finally:
             c_cat_a.close()
 
-        edited_agentes = st.data_editor(
-            df_agentes_cat,
-            use_container_width=True,
-            hide_index=True,
-            disabled=["codigo_agente", "pais"],
-            column_config={
-                "codigo_agente": st.column_config.TextColumn("Código Agente EOR"),
-                "pais": st.column_config.TextColumn("País"),
-                "nombre_agente": st.column_config.TextColumn("Nombre Empresa / Planta (Ej. PAN-AM GENERATING LIMITED)", width="large"),
-                "tipo_agente": st.column_config.SelectboxColumn("Tipo", options=["", "Generador", "Distribuidor", "Comercializador", "Gran Usuario"]),
-            },
-            key="editor_agentes",
-        )
+        if es_admin:
+            edited_agentes = st.data_editor(
+                df_agentes_cat,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["codigo_agente", "pais"],
+                column_config={
+                    "codigo_agente": st.column_config.TextColumn("Código Agente EOR"),
+                    "pais": st.column_config.TextColumn("País"),
+                    "nombre_agente": st.column_config.TextColumn("Nombre Empresa / Planta (Ej. PAN-AM GENERATING LIMITED)", width="large"),
+                    "tipo_agente": st.column_config.SelectboxColumn("Tipo", options=["", "Generador", "Distribuidor", "Comercializador", "Gran Usuario"]),
+                },
+                key="editor_agentes",
+            )
 
-        if st.button("💾 Guardar Cambios en Agentes", type="primary"):
-            c_save_a = obtener_conexion()
-            asegurar_esquema(c_save_a)
-            cur = c_save_a.cursor()
-            for _, row in edited_agentes.iterrows():
-                ejecutar_sql(
-                    cur,
-                    """
-                    UPDATE dim_catalogo_agentes
-                    SET nombre_agente = ?, tipo_agente = ?
-                    WHERE codigo_agente = ?
-                    """,
-                    (row["nombre_agente"] or "", row["tipo_agente"] or "", row["codigo_agente"]),
-                )
-            c_save_a.commit()
-            cur.close()
-            c_save_a.close()
-            st.cache_data.clear()
-            st.success("✅ Catálogo de agentes actualizado correctamente.")
-            st.rerun()
+            if st.button("💾 Guardar Cambios en Agentes", type="primary"):
+                c_save_a = obtener_conexion()
+                asegurar_esquema(c_save_a)
+                cur = c_save_a.cursor()
+                for _, row in edited_agentes.iterrows():
+                    ejecutar_sql(
+                        cur,
+                        """
+                        UPDATE dim_catalogo_agentes
+                        SET nombre_agente = ?, tipo_agente = ?
+                        WHERE codigo_agente = ?
+                        """,
+                        (row["nombre_agente"] or "", row["tipo_agente"] or "", row["codigo_agente"]),
+                    )
+                c_save_a.commit()
+                cur.close()
+                c_save_a.close()
+                st.cache_data.clear()
+                st.success("✅ Catálogo de agentes actualizado correctamente.")
+                st.rerun()
+        else:
+            st.dataframe(df_agentes_cat, use_container_width=True, hide_index=True)
 
     with subtab_excel_cat:
-        st.markdown("Descarga el catálogo actual a Excel, completa los nombres cómodamente y vuelve a subirlo.")
+        st.markdown("Descarga el catálogo actual a Excel para consulta o edición.")
         c_xl_cat = obtener_conexion()
         try:
             asegurar_esquema(c_xl_cat)
@@ -1018,96 +1096,101 @@ with tab_catalogo:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        archivo_cat_up = st.file_uploader("Subir Plantilla_Catalogo_MER.xlsx completada", type=["xlsx"])
-        if archivo_cat_up and st.button("⬆️ Actualizar Catálogo desde Excel"):
-            xl_cat = pd.ExcelFile(archivo_cat_up)
-            c_up_cat = obtener_conexion()
-            asegurar_esquema(c_up_cat)
-            cur = c_up_cat.cursor()
-            if "Nodos" in xl_cat.sheet_names:
-                df_n_up = pd.read_excel(xl_cat, sheet_name="Nodos").fillna("")
-                for _, r in df_n_up.iterrows():
-                    ejecutar_sql(
-                        cur,
-                        """
-                        INSERT INTO dim_catalogo_nodos (codigo_nodo, pais, nombre_nodo, subestacion, nivel_kv)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(codigo_nodo) DO UPDATE SET
-                            nombre_nodo=excluded.nombre_nodo,
-                            subestacion=excluded.subestacion,
-                            nivel_kv=excluded.nivel_kv
-                        """,
-                        (limpiar_codigo(r["codigo_nodo"]), str(r["pais"]).strip(), str(r["nombre_nodo"]).strip(), str(r["subestacion"]).strip(), str(r["nivel_kv"]).strip()),
-                    )
-            if "Agentes" in xl_cat.sheet_names:
-                df_a_up = pd.read_excel(xl_cat, sheet_name="Agentes").fillna("")
-                for _, r in df_a_up.iterrows():
-                    ejecutar_sql(
-                        cur,
-                        """
-                        INSERT INTO dim_catalogo_agentes (codigo_agente, pais, nombre_agente, tipo_agente)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(codigo_agente) DO UPDATE SET
-                            nombre_agente=excluded.nombre_agente,
-                            tipo_agente=excluded.tipo_agente
-                        """,
-                        (limpiar_codigo(r["codigo_agente"]), str(r["pais"]).strip(), str(r["nombre_agente"]).strip(), str(r["tipo_agente"]).strip()),
-                    )
-            c_up_cat.commit()
-            cur.close()
-            c_up_cat.close()
-            st.cache_data.clear()
-            st.success("✅ Catálogo importado exitosamente desde Excel.")
-            st.rerun()
+        if es_admin:
+            archivo_cat_up = st.file_uploader("Subir Plantilla_Catalogo_MER.xlsx completada", type=["xlsx"])
+            if archivo_cat_up and st.button("⬆️ Actualizar Catálogo desde Excel"):
+                xl_cat = pd.ExcelFile(archivo_cat_up)
+                c_up_cat = obtener_conexion()
+                asegurar_esquema(c_up_cat)
+                cur = c_up_cat.cursor()
+                if "Nodos" in xl_cat.sheet_names:
+                    df_n_up = pd.read_excel(xl_cat, sheet_name="Nodos").fillna("")
+                    for _, r in df_n_up.iterrows():
+                        ejecutar_sql(
+                            cur,
+                            """
+                            INSERT INTO dim_catalogo_nodos (codigo_nodo, pais, nombre_nodo, subestacion, nivel_kv)
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(codigo_nodo) DO UPDATE SET
+                                nombre_nodo=excluded.nombre_nodo,
+                                subestacion=excluded.subestacion,
+                                nivel_kv=excluded.nivel_kv
+                            """,
+                            (limpiar_codigo(r["codigo_nodo"]), str(r["pais"]).strip(), str(r["nombre_nodo"]).strip(), str(r["subestacion"]).strip(), str(r["nivel_kv"]).strip()),
+                        )
+                if "Agentes" in xl_cat.sheet_names:
+                    df_a_up = pd.read_excel(xl_cat, sheet_name="Agentes").fillna("")
+                    for _, r in df_a_up.iterrows():
+                        ejecutar_sql(
+                            cur,
+                            """
+                            INSERT INTO dim_catalogo_agentes (codigo_agente, pais, nombre_agente, tipo_agente)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(codigo_agente) DO UPDATE SET
+                                nombre_agente=excluded.nombre_agente,
+                                tipo_agente=excluded.tipo_agente
+                            """,
+                            (limpiar_codigo(r["codigo_agente"]), str(r["pais"]).strip(), str(r["nombre_agente"]).strip(), str(r["tipo_agente"]).strip()),
+                        )
+                c_up_cat.commit()
+                cur.close()
+                c_up_cat.close()
+                st.cache_data.clear()
+                st.success("✅ Catálogo importado exitosamente desde Excel.")
+                st.rerun()
 
 # ------------------------------------------
 # PESTAÑA 3: INGRESO DE ARCHIVOS (ETL)
 # ------------------------------------------
 with tab_ingesta:
     st.subheader("Cargar Predespachos Regionales (PUB004-*.zip)")
-    st.markdown("""
-    Arrastra aquí los archivos `.zip` descargados del EOR. El sistema detectará automáticamente:
+
+    if not es_admin:
+        st.warning("🔒 Acceso restringido. Tu sesión es de **Visitante (Solo Consulta)**; inicia sesión con la contraseña de Administrador para cargar archivos ZIP.")
+    else:
+        st.markdown("""
+        Arrastra aquí los archivos `.zip` descargados del EOR. El sistema detectará automáticamente:
 - **Nuevos días operativos** (`[NUEVO]`)
 - **Modificaciones o redespachos** publicados más tarde (`[UPDATE]`), reemplazando las versiones obsoletas.
 - **Archivos ya existentes o más antiguos** (`[SKIP]`), omitiéndolos para proteger las versiones vigentes.
-    """)
+        """)
 
-    archivos_subidos = st.file_uploader(
-        "Selecciona o arrastra tus archivos PUB004-PRE-*.zip",
-        type=["zip"],
-        accept_multiple_files=True,
-        key=f"uploader_zip_{st.session_state['uploader_zip_key']}",
-    )
+        archivos_subidos = st.file_uploader(
+            "Selecciona o arrastra tus archivos PUB004-PRE-*.zip",
+            type=["zip"],
+            accept_multiple_files=True,
+            key=f"uploader_zip_{st.session_state['uploader_zip_key']}",
+        )
 
-    if archivos_subidos:
-        st.info(f"{len(archivos_subidos)} archivo(s) listo(s) para procesar.")
-        if st.button("🚀 Procesar y Guardar en Base de Datos", type="primary"):
-            log_buffer = io.StringIO()
-            with st.spinner("Leyendo archivos Excel y actualizando base de datos..."):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    for up_file in archivos_subidos:
-                        ruta_tmp = os.path.join(tmpdir, up_file.name)
-                        with open(ruta_tmp, "wb") as f_out:
-                            f_out.write(up_file.getbuffer())
+        if archivos_subidos:
+            st.info(f"{len(archivos_subidos)} archivo(s) listo(s) para procesar.")
+            if st.button("🚀 Procesar y Guardar en Base de Datos", type="primary"):
+                log_buffer = io.StringIO()
+                with st.spinner("Leyendo archivos Excel y actualizando base de datos..."):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        for up_file in archivos_subidos:
+                            ruta_tmp = os.path.join(tmpdir, up_file.name)
+                            with open(ruta_tmp, "wb") as f_out:
+                                f_out.write(up_file.getbuffer())
 
-                    with contextlib.redirect_stdout(log_buffer):
-                        procesar_carpeta(tmpdir)
+                        with contextlib.redirect_stdout(log_buffer):
+                            procesar_carpeta(tmpdir)
 
-                c_sync = obtener_conexion()
-                inicializar_y_sincronizar_catalogo(c_sync)
-                c_sync.close()
+                    c_sync = obtener_conexion()
+                    inicializar_y_sincronizar_catalogo(c_sync)
+                    c_sync.close()
 
-            st.cache_data.clear()
-            st.session_state["ultimo_log_ingesta"] = log_buffer.getvalue().strip()
-            st.session_state["uploader_zip_key"] += 1
-            st.rerun()
+                st.cache_data.clear()
+                st.session_state["ultimo_log_ingesta"] = log_buffer.getvalue().strip()
+                st.session_state["uploader_zip_key"] += 1
+                st.rerun()
 
-    if "ultimo_log_ingesta" in st.session_state:
-        st.success("✅ ¡Sincronización completada y catálogo actualizado!")
-        if st.session_state["ultimo_log_ingesta"]:
-            st.code(st.session_state["ultimo_log_ingesta"], language="text")
-        else:
-            st.warning("No se encontraron archivos válidos con patrón PUB004-*.xlsx dentro del ZIP.")
+        if "ultimo_log_ingesta" in st.session_state:
+            st.success("✅ ¡Sincronización completada y catálogo actualizado!")
+            if st.session_state["ultimo_log_ingesta"]:
+                st.code(st.session_state["ultimo_log_ingesta"], language="text")
+            else:
+                st.warning("No se encontraron archivos válidos con patrón PUB004-*.xlsx dentro del ZIP.")
 
 # ------------------------------------------
 # PESTAÑA 4: AUDITORÍA DEL HISTORIAL
