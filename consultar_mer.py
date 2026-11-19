@@ -131,7 +131,12 @@ def construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod=None):
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
         GROUP BY date(fecha_hora), strftime('%H', fecha_hora), pais,
                  TRIM(codigo_agente), TRIM(agente_contraparte),
-                 UPPER(TRIM(tipo_contrato)), LOWER(TRIM(tipo_transaccion))
+                 UPPER(TRIM(tipo_contrato)),
+                 CASE LOWER(TRIM(tipo_transaccion))
+                     WHEN 'r' THEN 'Compra (Retiro)'
+                     WHEN 'i' THEN 'Venta (Inyección)'
+                     ELSE tipo_transaccion
+                 END
         ORDER BY fecha, hora, agente_nacional, agente_contraparte
     """, conn, params=params)
 
@@ -190,7 +195,12 @@ def construir_df_top_agente_hora(conn, f_ini, f_fin, pais_cod=None):
         FROM fact_oportunidad_top
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
         GROUP BY date(fecha_hora), strftime('%H', fecha_hora), pais,
-                 TRIM(codigo_agente), LOWER(TRIM(tipo_transaccion))
+                 TRIM(codigo_agente),
+                 CASE LOWER(TRIM(tipo_transaccion))
+                     WHEN 'r' THEN 'Compra (Retiro)'
+                     WHEN 'i' THEN 'Venta (Inyección)'
+                     ELSE tipo_transaccion
+                 END
         ORDER BY fecha, hora, agente_nacional
     """, conn, params=params)
 
