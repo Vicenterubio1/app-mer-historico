@@ -27,10 +27,11 @@ MESES_CORTOS_ES = [
 ]
 
 
-def construir_df_anual_mer(conn, anio, pais_filtro=None):
-    """Construye el resumen mensualizado (ene-dic) de compras y ventas (TCP y TOP) para un año."""
+def construir_df_anual_mer(conn, anio, pais_filtro=None, mes_hasta=12):
+    """Construye el resumen mensualizado (ene-dic) cortado hasta el mes indicado (mes_hasta)."""
     f_ini = f"{int(anio):04d}-01-01"
     f_fin = f"{int(anio):04d}-12-31"
+    mes_limite = max(1, min(12, int(mes_hasta)))
 
     params = [f_ini, f_fin]
     cond_pais = ""
@@ -68,6 +69,19 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None):
     for m_idx in range(1, 13):
         mes_str = f"{m_idx:02d}"
         mes_etq = MESES_CORTOS_ES[m_idx - 1]
+
+        if m_idx > mes_limite:
+            filas.append({
+                "mes_num": m_idx,
+                "Fecha": mes_etq,
+                "Compras_Contratos": None,
+                "Compras_Oportunidad": None,
+                "Ventas_Contratos": None,
+                "Ventas_Oportunidad": None,
+                "Total_Compras": None,
+                "Total_Ventas": None,
+            })
+            continue
 
         def _val(df, tipo):
             if df.empty or "mes" not in df.columns:
@@ -215,14 +229,17 @@ def generar_pdf_transacciones_anuales_mer(
     conn,
     anio,
     pais_filtro=None,
+    mes_hasta=12,
     ruta_logo="logo_cnd.png",
 ):
     """Genera el PDF anual 'Transacciones de Energía en el Mercado Eléctrico Regional' con tabla y 2 gráficas."""
     anio_int = int(anio)
-    df_anual = construir_df_anual_mer(conn, anio_int, pais_filtro)
+    mes_limite = max(1, min(12, int(mes_hasta)))
+    df_anual = construir_df_anual_mer(conn, anio_int, pais_filtro, mes_hasta=mes_limite)
 
     sufijo_pais = f"_{pais_filtro}" if pais_filtro else ""
-    nombre_archivo = f"Transacciones_Energia_MER_{anio_int}{sufijo_pais}.pdf"
+    sufijo_mes = f"_hasta_{MESES_CORTOS_ES[mes_limite - 1]}" if mes_limite < 12 else ""
+    nombre_archivo = f"Transacciones_Energia_MER_{anio_int}{sufijo_pais}{sufijo_mes}.pdf"
 
     doc = SimpleDocTemplate(
         nombre_archivo,
@@ -237,7 +254,6 @@ def generar_pdf_transacciones_anuales_mer(
     styles = getSampleStyleSheet()
     azul_cnd = colors.HexColor("#1F4E78")
 
-    # 1. Encabezado Institucional (Solo logo completo ampliado y alineado a la izquierda)
     estilo_cnd = ParagraphStyle(
         "TituloCNDAnual",
         parent=styles["Normal"],
@@ -268,7 +284,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(encabezado)
     elementos.append(Spacer(1, 0.12 * inch))
 
-    # 2. Tabla Principal Azul Marino (ene - dic + Total)
     titulo_tabla = f"TRANSACCIONES DE ENERGÍA EN EL MERCADO ELÉCTRICO REGIONAL {anio_int}"
     if pais_filtro:
         titulo_tabla += f" ({pais_filtro})"
@@ -351,7 +366,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(tabla)
     elementos.append(Spacer(1, 0.14 * inch))
 
-    # 3. Gráfica 1: Retiros de energía del MER {AÑO} (MWh)
     vals_retiros = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Compras"]]
     graf_retiros = _crear_grafico_barras_mer(
         titulo=f"Retiros de energía del MER {anio_int} (MWh)",
@@ -362,7 +376,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(graf_retiros)
     elementos.append(Spacer(1, 0.12 * inch))
 
-    # 4. Gráfica 2: Inyecciones de energía al MER {AÑO} (MWh)
     vals_inyecciones = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Ventas"]]
     graf_inyecciones = _crear_grafico_barras_mer(
         titulo=f"Inyecciones de energía al MER {anio_int} (MWh)",
