@@ -244,7 +244,6 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
     c_tipo_tr = buscar_col(["tipo transa", "transacción", "transaccion"])
     c_tipo_ct = buscar_col(["tipo contrato"])
     c_tipo_of = buscar_col(["tipo oferta", "oferta"])
-    # Respaldo posicional por si la columna L tiene encabezado abreviado
     if not c_tipo_of and len(df.columns) > 11:
         c_tipo_of = df.columns[11]
 
@@ -424,7 +423,6 @@ def procesar_excel_en_memoria(conn, nombre_excel, contenido_bytes, ts_publicacio
     if existente:
         arch_prev, hash_prev, ts_prev = existente
         if hash_prev == hash_actual:
-            # Verificar si faltaba poblar tipo_oferta en registros cargados antes de la actualización
             ejecutar_sql(
                 cur,
                 """
@@ -538,4 +536,4 @@ def procesar_carpeta(ruta_carpeta="."):
 
 
 if __name__ == "__main__":
-    procesar_carpeta(".")﻿
+    procesar_carpeta(".")
