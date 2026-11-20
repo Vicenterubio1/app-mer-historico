@@ -27,6 +27,10 @@ from consultar_mer import (
     PREFIJO_PAIS,
 )
 from reporte_compra_venta_pdf import generar_pdf_informe_compra_venta
+from reporte_anual_cnd_pdf import (
+    construir_df_anual_mer,
+    generar_pdf_transacciones_anuales_mer,
+)
 
 st.set_page_config(page_title="Gestión Histórica MER", page_icon="⚡", layout="wide")
 
@@ -77,7 +81,7 @@ def verificar_clave(clave_ingresada, clave_real):
 
 
 if "usuario_activo" not in st.session_state:
-    st.session_state["usuario_activo"] = None  # dict: {"usuario": ..., "nombre": ..., "rol": ...}
+    st.session_state["usuario_activo"] = None
 
 
 def pantalla_login():
@@ -85,7 +89,6 @@ def pantalla_login():
     clave_admin_legacy = obtener_secreto("ADMIN_PASSWORD")
     clave_visitante_legacy = obtener_secreto("VISITOR_PASSWORD")
 
-    # Si no hay usuarios ni claves configuradas, permite acceso local sin bloqueo
     if not usuarios_cfg and not clave_admin_legacy and not clave_visitante_legacy:
         st.session_state["usuario_activo"] = {
             "usuario": "local",
@@ -108,7 +111,6 @@ def pantalla_login():
             ingresar = st.form_submit_button("🔓 Ingresar al Sistema", type="primary", use_container_width=True)
 
             if ingresar:
-                # 1. Validar contra cuentas nominales [usuarios.<id>]
                 if usr_in and usr_in in usuarios_cfg:
                     datos_u = usuarios_cfg[usr_in]
                     pwd_real = str(datos_u.get("password", "")).strip()
@@ -124,7 +126,6 @@ def pantalla_login():
                         st.rerun()
                     else:
                         st.error("Usuario o contraseña incorrectos.")
-                # 2. Respaldo por si aún usas ADMIN_PASSWORD / VISITOR_PASSWORD sin usuario
                 elif not usr_in and verificar_clave(pwd_in, clave_admin_legacy):
                     st.session_state["usuario_activo"] = {
                         "usuario": "admin",
@@ -144,7 +145,6 @@ def pantalla_login():
     return False
 
 
-# Detiene toda ejecución y consulta a BD si el usuario no ha iniciado sesión
 if not pantalla_login():
     st.stop()
 
@@ -398,6 +398,16 @@ def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def cargar_df_anual_mer_cache(anio_sel, pais_cod):
+    c = obtener_conexion()
+    try:
+        asegurar_esquema(c)
+        return construir_df_anual_mer(c, anio_sel, pais_cod)
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def cargar_tablas_horarias_cache(f_ini, f_fin, pais_cod):
     c = obtener_conexion()
     try:
@@ -460,7 +470,6 @@ def cargar_auditoria_cache():
 # Inicializar entorno una única vez por proceso
 usa_pg = preparar_entorno_bd()
 
-# Estado para limpiar automáticamente la lista de archivos subidos tras procesar
 if "uploader_zip_key" not in st.session_state:
     st.session_state["uploader_zip_key"] = 0
 
@@ -470,7 +479,6 @@ if "uploader_zip_key" not in st.session_state:
 st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
 st.caption("Ingesta de Predespachos (PUB004), Control de Versiones, Catálogo y Reportería Horaria / CND")
 
-# Tarjeta de bienvenida personalizada en la barra lateral
 rol_badge = "Administrador" if es_admin else "Consulta"
 st.sidebar.markdown(f"### 👋 Hola, **{usuario_actual['nombre']}**")
 st.sidebar.caption(f"Usuario: `{usuario_actual['usuario']}` · Rol: **{rol_badge}**")
@@ -729,6 +737,97 @@ with tab_reportes:
                         mime="application/pdf",
                         use_container_width=True,
                     )
+
+        st.divider()
+
+        # ==========================================
+        # REPORTE ANUAL CND: TRANSACCIONES MER (TABLA + GRÁFICAS PDF)
+        # ==========================================
+        st.subheader("📊 Reporte Anual CND: Transacciones de Energía en el MER (PDF con Gráficas)")
+        st.caption(
+            f"Consolida de enero a diciembre las compras y ventas (Contratos y Oportunidad) para el área seleccionada ({pais_cod or 'REGIONAL MER'})."
+        )
+
+        anios_disponibles = sorted(list({int(str(f)[:4]) for f in fechas_disp}), reverse=True)
+        col_an_sel, col_an_btn, col_an_dl = st.columns([1, 1.3, 1.7])
+
+        with col_an_sel:
+            anio_sel_cnd = st.selectbox("Año del Reporte:", options=anios_disponibles, key="sel_anio_cnd_anual")
+
+        with col_an_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("📄 Generar PDF Anual MER", type="primary", use_container_width=True, key="btn_pdf_anual_mer"):
+                c_an = obtener_conexion()
+                try:
+                    asegurar_esquema(c_an)
+                    ruta_pdf_an = generar_pdf_transacciones_anuales_mer(
+                        conn=c_an,
+                        anio=anio_sel_cnd,
+                        pais_filtro=pais_cod,
+                        ruta_logo="logo_cnd.png",
+                    )
+                finally:
+                    c_an.close()
+
+                if os.path.exists(ruta_pdf_an):
+                    with open(ruta_pdf_an, "rb") as f_an:
+                        st.session_state["pdf_anual_bytes"] = f_an.read()
+                        st.session_state["pdf_anual_nombre"] = os.path.basename(ruta_pdf_an)
+
+        with col_an_dl:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if "pdf_anual_bytes" in st.session_state:
+                st.download_button(
+                    label=f"⬇️ Descargar {st.session_state['pdf_anual_nombre']}",
+                    data=st.session_state["pdf_anual_bytes"],
+                    file_name=st.session_state["pdf_anual_nombre"],
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="dl_pdf_anual_mer",
+                )
+
+        df_anual_prev = cargar_df_anual_mer_cache(anio_sel_cnd, pais_cod)
+        if not df_anual_prev.empty:
+            df_anual_show = df_anual_prev[[
+                "Fecha",
+                "Compras_Contratos",
+                "Compras_Oportunidad",
+                "Ventas_Contratos",
+                "Ventas_Oportunidad",
+                "Total_Compras",
+                "Total_Ventas",
+            ]].rename(columns={
+                "Compras_Contratos": "COMPRAS CONTRATOS (MWh)",
+                "Compras_Oportunidad": "COMPRAS OPORTUNIDAD (MWh)",
+                "Ventas_Contratos": "VENTAS CONTRATOS (MWh)",
+                "Ventas_Oportunidad": "VENTAS OPORTUNIDAD (MWh)",
+                "Total_Compras": "TOTAL COMPRAS (MWh)",
+                "Total_Ventas": "TOTAL VENTAS (MWh)",
+            })
+            fila_tot_an = pd.DataFrame([{
+                "Fecha": "Total",
+                "COMPRAS CONTRATOS (MWh)": df_anual_show["COMPRAS CONTRATOS (MWh)"].dropna().sum(),
+                "COMPRAS OPORTUNIDAD (MWh)": df_anual_show["COMPRAS OPORTUNIDAD (MWh)"].dropna().sum(),
+                "VENTAS CONTRATOS (MWh)": df_anual_show["VENTAS CONTRATOS (MWh)"].dropna().sum(),
+                "VENTAS OPORTUNIDAD (MWh)": df_anual_show["VENTAS OPORTUNIDAD (MWh)"].dropna().sum(),
+                "TOTAL COMPRAS (MWh)": df_anual_show["TOTAL COMPRAS (MWh)"].dropna().sum(),
+                "TOTAL VENTAS (MWh)": df_anual_show["TOTAL VENTAS (MWh)"].dropna().sum(),
+            }])
+            df_anual_show = pd.concat([df_anual_show, fila_tot_an], ignore_index=True)
+
+            def _fmt_an_web(v):
+                if v is None or pd.isna(v):
+                    return ""
+                if abs(float(v)) < 0.0005:
+                    return "-"
+                return f"{float(v):,.3f}"
+
+            cols_an_num = [c for c in df_anual_show.columns if c != "Fecha"]
+            st.dataframe(
+                df_anual_show.style.format({c: _fmt_an_web for c in cols_an_num}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.divider()
 
