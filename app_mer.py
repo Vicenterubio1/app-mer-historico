@@ -398,11 +398,11 @@ def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def cargar_df_anual_mer_cache(anio_sel, pais_cod):
+def cargar_df_anual_mer_cache(anio_sel, pais_cod, mes_hasta):
     c = obtener_conexion()
     try:
         asegurar_esquema(c)
-        return construir_df_anual_mer(c, anio_sel, pais_cod)
+        return construir_df_anual_mer(c, anio_sel, pais_cod, mes_hasta=mes_hasta)
     finally:
         c.close()
 
@@ -745,14 +745,45 @@ with tab_reportes:
         # ==========================================
         st.subheader("📊 Reporte Anual CND: Transacciones de Energía en el MER (PDF con Gráficas)")
         st.caption(
-            f"Consolida de enero a diciembre las compras y ventas (Contratos y Oportunidad) para el área seleccionada ({pais_cod or 'REGIONAL MER'})."
+            f"Consolida de enero hasta el mes seleccionado las compras y ventas (Contratos y Oportunidad) para el área seleccionada ({pais_cod or 'REGIONAL MER'})."
         )
 
         anios_disponibles = sorted(list({int(str(f)[:4]) for f in fechas_disp}), reverse=True)
-        col_an_sel, col_an_btn, col_an_dl = st.columns([1, 1.3, 1.7])
+        opciones_meses_corte = [
+            (1, "01 - Enero"),
+            (2, "02 - Febrero"),
+            (3, "03 - Marzo"),
+            (4, "04 - Abril"),
+            (5, "05 - Mayo"),
+            (6, "06 - Junio"),
+            (7, "07 - Julio"),
+            (8, "08 - Agosto"),
+            (9, "09 - Septiembre"),
+            (10, "10 - Octubre"),
+            (11, "11 - Noviembre"),
+            (12, "12 - Diciembre"),
+        ]
+
+        col_an_sel, col_mes_corte, col_an_btn, col_an_dl = st.columns([0.9, 1.2, 1.2, 1.5])
 
         with col_an_sel:
             anio_sel_cnd = st.selectbox("Año del Reporte:", options=anios_disponibles, key="sel_anio_cnd_anual")
+
+        with col_mes_corte:
+            hoy = datetime.now()
+            if anio_sel_cnd == hoy.year and hoy.month > 1:
+                idx_mes_default = hoy.month - 2  # Mes anterior cerrado (ej. en nov -> octubre)
+            else:
+                idx_mes_default = 11  # Diciembre para años anteriores
+
+            mes_corte_opcion = st.selectbox(
+                "Cubrir hasta el mes de:",
+                options=opciones_meses_corte,
+                index=idx_mes_default,
+                format_func=lambda x: x[1],
+                key="sel_mes_corte_anual",
+            )
+            mes_hasta_cnd = mes_corte_opcion[0]
 
         with col_an_btn:
             st.markdown("<br>", unsafe_allow_html=True)
@@ -764,6 +795,7 @@ with tab_reportes:
                         conn=c_an,
                         anio=anio_sel_cnd,
                         pais_filtro=pais_cod,
+                        mes_hasta=mes_hasta_cnd,
                         ruta_logo="logo_cnd.png",
                     )
                 finally:
@@ -786,7 +818,7 @@ with tab_reportes:
                     key="dl_pdf_anual_mer",
                 )
 
-        df_anual_prev = cargar_df_anual_mer_cache(anio_sel_cnd, pais_cod)
+        df_anual_prev = cargar_df_anual_mer_cache(anio_sel_cnd, pais_cod, mes_hasta_cnd)
         if not df_anual_prev.empty:
             df_anual_show = df_anual_prev[[
                 "Fecha",
