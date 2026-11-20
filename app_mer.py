@@ -52,6 +52,12 @@ def asegurar_esquema(conn):
         cur_sp.close()
 
 
+def limpiar_descarga(clave_bytes, clave_nombre):
+    """Elimina de session_state el archivo generado una vez que el usuario hace clic en Descargar."""
+    st.session_state.pop(clave_bytes, None)
+    st.session_state.pop(clave_nombre, None)
+
+
 # ==========================================
 # CONTROL DE ACCESO PERSONALIZADO (st.secrets)
 # ==========================================
@@ -736,6 +742,8 @@ with tab_reportes:
                         file_name=st.session_state["pdf_cnd_nombre"],
                         mime="application/pdf",
                         use_container_width=True,
+                        on_click=limpiar_descarga,
+                        args=("pdf_cnd_bytes", "pdf_cnd_nombre"),
                     )
 
         st.divider()
@@ -767,14 +775,20 @@ with tab_reportes:
         col_an_sel, col_mes_corte, col_an_btn, col_an_dl = st.columns([0.9, 1.2, 1.2, 1.5])
 
         with col_an_sel:
-            anio_sel_cnd = st.selectbox("Año del Reporte:", options=anios_disponibles, key="sel_anio_cnd_anual")
+            anio_sel_cnd = st.selectbox(
+                "Año del Reporte:",
+                options=anios_disponibles,
+                key="sel_anio_cnd_anual",
+                on_change=limpiar_descarga,
+                args=("pdf_anual_bytes", "pdf_anual_nombre"),
+            )
 
         with col_mes_corte:
             hoy = datetime.now()
             if anio_sel_cnd == hoy.year and hoy.month > 1:
-                idx_mes_default = hoy.month - 2  # Mes anterior cerrado (ej. en nov -> octubre)
+                idx_mes_default = hoy.month - 2
             else:
-                idx_mes_default = 11  # Diciembre para años anteriores
+                idx_mes_default = 11
 
             mes_corte_opcion = st.selectbox(
                 "Cubrir hasta el mes de:",
@@ -782,6 +796,8 @@ with tab_reportes:
                 index=idx_mes_default,
                 format_func=lambda x: x[1],
                 key="sel_mes_corte_anual",
+                on_change=limpiar_descarga,
+                args=("pdf_anual_bytes", "pdf_anual_nombre"),
             )
             mes_hasta_cnd = mes_corte_opcion[0]
 
@@ -816,6 +832,8 @@ with tab_reportes:
                     mime="application/pdf",
                     use_container_width=True,
                     key="dl_pdf_anual_mer",
+                    on_click=limpiar_descarga,
+                    args=("pdf_anual_bytes", "pdf_anual_nombre"),
                 )
 
         df_anual_prev = cargar_df_anual_mer_cache(anio_sel_cnd, pais_cod, mes_hasta_cnd)
@@ -928,6 +946,8 @@ with tab_reportes:
                     file_name=st.session_state["pdf_cv_nombre"],
                     mime="application/pdf",
                     key="dl_pdf_compra_venta",
+                    on_click=limpiar_descarga,
+                    args=("pdf_cv_bytes", "pdf_cv_nombre"),
                 )
 
         st.divider()
@@ -1137,6 +1157,8 @@ with tab_reportes:
                     file_name=st.session_state["xlsx_nombre"],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
+                    on_click=limpiar_descarga,
+                    args=("xlsx_bytes", "xlsx_nombre"),
                 )
 
 # ------------------------------------------
