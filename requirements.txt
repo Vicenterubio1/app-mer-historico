@@ -6,3 +6,4 @@ xlsxwriter
 fpdf2
 reportlab
 plotly
+matplotlib
