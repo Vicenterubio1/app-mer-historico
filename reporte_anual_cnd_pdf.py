@@ -1,29 +1,33 @@
 import os
-import math
+import io
+from datetime import datetime
 import pandas as pd
 
-from reportlab.lib.pagesizes import letter
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
 from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import cm
 from reportlab.platypus import (
     SimpleDocTemplate,
     Table,
     TableStyle,
+    Image,
     Paragraph,
     Spacer,
-    Image as RLImage,
+    KeepTogether,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT
-from reportlab.graphics.shapes import Drawing, Rect, String
-from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 from db_mer import ejecutar_consulta_df
 
 MESES_CORTOS_ES = [
     "ene", "feb", "mar", "abr", "may", "jun",
-    "jul", "ago", "sep", "oct", "nov", "dic",
+    "jul", "ago", "sep", "oct", "nov", "dic"
 ]
 
 
@@ -65,6 +69,22 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None, mes_hasta=12):
         params=params,
     )
 
+    # Ventas Oportunidad desde CNFFF + O.I. Flexibilidad en TCP (sin restar de Contratos)
+    df_flex = ejecutar_consulta_df(
+        f"""
+        SELECT SUBSTR(CAST(fecha_hora AS TEXT), 6, 2) AS mes,
+               SUM(ABS(mw_predespachados)) AS mwh
+        FROM fact_contratos_tcp
+        WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+          AND UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
+          AND LOWER(TRIM(COALESCE(tipo_oferta, ''))) = 'o.i. flexibilidad'
+          AND ABS(COALESCE(mw_predespachados, 0)) > 1e-9
+        GROUP BY SUBSTR(CAST(fecha_hora AS TEXT), 6, 2)
+        """,
+        conn,
+        params=params,
+    )
+
     filas = []
     for m_idx in range(1, 13):
         mes_str = f"{m_idx:02d}"
@@ -91,10 +111,24 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None, mes_hasta=12):
                 return None
             return float(sub["mwh"].iloc[0])
 
+        def _val_flex():
+            if df_flex.empty or "mes" not in df_flex.columns:
+                return 0.0
+            sub = df_flex[df_flex["mes"].astype(str).str.strip().str.zfill(2) == mes_str]
+            if sub.empty or pd.isna(sub["mwh"].iloc[0]):
+                return 0.0
+            return float(sub["mwh"].iloc[0])
+
         comp_tcp = _val(df_tcp, "r")
         comp_top = _val(df_top, "r")
         vent_tcp = _val(df_tcp, "i")
-        vent_top = _val(df_top, "i")
+        vent_top_base = _val(df_top, "i")
+        flex_mwh = _val_flex()
+
+        if vent_top_base is not None or flex_mwh > 0:
+            vent_top = (vent_top_base or 0.0) + flex_mwh
+        else:
+            vent_top = None
 
         tiene_compras = (comp_tcp is not None) or (comp_top is not None)
         tiene_ventas = (vent_tcp is not None) or (vent_top is not None)
@@ -116,113 +150,68 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None, mes_hasta=12):
     return pd.DataFrame(filas)
 
 
-def _construir_logo_cnd(ruta_logo, max_w, max_h, estilo_fallback=None):
-    if ruta_logo and os.path.exists(ruta_logo):
-        try:
-            lector = ImageReader(ruta_logo)
-            iw, ih = lector.getSize()
-            if iw > 0 and ih > 0:
-                escala = min(max_w / float(iw), max_h / float(ih))
-                return RLImage(ruta_logo, width=iw * escala, height=ih * escala)
-        except Exception:
-            pass
-    if estilo_fallback is not None:
-        return Paragraph("<b>CENTRO NACIONAL<br/>DE DESPACHO</b>", estilo_fallback)
-    return Spacer(1, 1)
+def _crear_grafica_barras_apiladas(df_anual, modo="compras"):
+    """Genera imagen PNG en memoria de barras apiladas estilo CND (Contratos vs Oportunidad)."""
+    meses = df_anual["Fecha"].tolist()
+    x = list(range(len(meses)))
 
+    if modo == "compras":
+        serie_cont = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Compras_Contratos"]]
+        serie_opor = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Compras_Oportunidad"]]
+        titulo = "RETIROS DE ENERGIA MER"
+        lbl_cont = "RETIROS CONTRATOS"
+        lbl_opor = "RETIROS OPORTUNIDAD"
+        color_cont = "#2E6B9E"
+        color_opor = "#4F9CD6"
+    else:
+        serie_cont = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Ventas_Contratos"]]
+        serie_opor = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Ventas_Oportunidad"]]
+        titulo = "INYECCIONES DE ENERGIA MER"
+        lbl_cont = "INYECCIONES CONTRATOS"
+        lbl_opor = "INYECCIONES OPORTUNIDAD"
+        color_cont = "#1B7A43"
+        color_opor = "#48B872"
 
-def _crear_grafico_barras_mer(titulo, valores, ancho_pt=525, alto_pt=152):
-    """Dibuja un gráfico de barras estilo institucional con etiquetas de datos sobre cada barra."""
-    azul_cnd = colors.HexColor("#1F4E78")
-    borde_caja = colors.HexColor("#D9D9D9")
-    rejilla = colors.HexColor("#E6E6E6")
-    texto_gris = colors.HexColor("#595959")
+    fig, ax = plt.subplots(figsize=(8.6, 3.05), dpi=220)
+    ancho = 0.56
 
-    d = Drawing(ancho_pt, alto_pt)
-    d.add(Rect(0, 0, ancho_pt, alto_pt, strokeColor=borde_caja, fillColor=colors.white, strokeWidth=0.8))
+    ax.bar(x, serie_cont, width=ancho, label=lbl_cont, color=color_cont, edgecolor="none", zorder=3)
+    ax.bar(x, serie_opor, width=ancho, bottom=serie_cont, label=lbl_opor, color=color_opor, edgecolor="none", zorder=3)
 
-    d.add(
-        String(
-            ancho_pt / 2.0,
-            alto_pt - 16,
-            titulo,
-            fontName="Helvetica-Bold",
-            fontSize=9.5,
-            fillColor=texto_gris,
-            textAnchor="middle",
-        )
+    max_tot = max((c + o for c, o in zip(serie_cont, serie_opor)), default=0.0)
+    techo = max(max_tot * 1.18, 100.0)
+    ax.set_ylim(0, techo)
+
+    ax.set_title(titulo, fontsize=10, fontweight="bold", color="#222222", pad=22)
+    ax.set_ylabel("MWh", fontsize=8.5, fontweight="bold", color="#333333")
+    ax.set_xticks(x)
+    ax.set_xticklabels(meses, fontsize=8, color="#222222")
+    ax.tick_params(axis="y", labelsize=7.5, colors="#333333")
+
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda val, pos: f"{val:,.0f}"))
+    ax.grid(axis="y", linestyle="-", linewidth=0.5, color="#D9D9D9", zorder=0)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#888888")
+    ax.spines["bottom"].set_color("#888888")
+
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.13),
+        ncol=2,
+        frameon=False,
+        fontsize=7.5,
+        handlelength=1.1,
+        handleheight=0.9,
     )
 
-    vals_clean = [max(0.0, float(v or 0.0)) for v in valores]
-    max_val = max(vals_clean) if vals_clean else 0.0
-
-    if max_val <= 0:
-        y_max = 100.0
-        y_step = 20.0
-    else:
-        orden = 10 ** math.floor(math.log10(max_val))
-        norm = max_val / orden
-        if norm <= 1.0:
-            top_norm, step_norm = 1.2, 0.2
-        elif norm <= 2.5:
-            top_norm, step_norm = 3.0, 0.5
-        elif norm <= 4.5:
-            top_norm, step_norm = 5.0, 0.5
-        elif norm <= 9.0:
-            top_norm, step_norm = 10.0, 1.0
-        else:
-            top_norm, step_norm = 12.0, 2.0
-        y_max = top_norm * orden
-        y_step = step_norm * orden
-
-    bc = VerticalBarChart()
-    bc.x = 46
-    bc.y = 22
-    bc.width = ancho_pt - 62
-    bc.height = alto_pt - 50
-    bc.data = [vals_clean]
-    bc.strokeColor = None
-    bc.barWidth = 14
-    bc.groupSpacing = 12
-
-    bc.valueAxis.valueMin = 0
-    bc.valueAxis.valueMax = y_max
-    bc.valueAxis.valueStep = y_step
-    bc.valueAxis.strokeColor = rejilla
-    bc.valueAxis.gridStrokeColor = rejilla
-    bc.valueAxis.gridStrokeWidth = 0.5
-    bc.valueAxis.visibleGrid = True
-    bc.valueAxis.labels.fontName = "Helvetica"
-    bc.valueAxis.labels.fontSize = 6.8
-    bc.valueAxis.labels.fillColor = texto_gris
-    bc.valueAxis.labelTextFormat = lambda v: f"{int(round(v)):,}"
-
-    bc.categoryAxis.categoryNames = MESES_CORTOS_ES
-    bc.categoryAxis.strokeColor = rejilla
-    bc.categoryAxis.labels.fontName = "Helvetica"
-    bc.categoryAxis.labels.fontSize = 7.2
-    bc.categoryAxis.labels.fillColor = texto_gris
-    bc.categoryAxis.labels.boxAnchor = "n"
-    bc.categoryAxis.labels.dy = -3
-
-    bc.bars[0].fillColor = azul_cnd
-    bc.bars[0].strokeColor = azul_cnd
-
-    bc.barLabels.nudge = 7
-    bc.barLabelFormat = lambda v: f"{int(round(v)):,}"
-    bc.barLabels.fontName = "Helvetica-Bold"
-    bc.barLabels.fontSize = 6.5
-    bc.barLabels.fillColor = colors.white
-    bc.barLabels.boxFillColor = azul_cnd
-    bc.barLabels.boxStrokeColor = azul_cnd
-    bc.barLabels.boxAnchor = "c"
-    bc.barLabels.topPadding = 1.5
-    bc.barLabels.bottomPadding = 1.5
-    bc.barLabels.leftPadding = 2.5
-    bc.barLabels.rightPadding = 2.5
-
-    d.add(bc)
-    return d
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=220)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def generar_pdf_transacciones_anuales_mer(
@@ -231,159 +220,178 @@ def generar_pdf_transacciones_anuales_mer(
     pais_filtro=None,
     mes_hasta=12,
     ruta_logo="logo_cnd.png",
+    ruta_salida=None,
 ):
-    """Genera el PDF anual 'Transacciones de Energía en el Mercado Eléctrico Regional' con tabla y 2 gráficas."""
-    anio_int = int(anio)
+    """Genera el PDF anual 'Transacciones de Energía en el MER' con tabla mensualizada y 2 gráficas."""
     mes_limite = max(1, min(12, int(mes_hasta)))
-    df_anual = construir_df_anual_mer(conn, anio_int, pais_filtro, mes_hasta=mes_limite)
+    df_anual = construir_df_anual_mer(conn, anio, pais_filtro=pais_filtro, mes_hasta=mes_limite)
 
-    sufijo_pais = f"_{pais_filtro}" if pais_filtro else ""
-    sufijo_mes = f"_hasta_{MESES_CORTOS_ES[mes_limite - 1]}" if mes_limite < 12 else ""
-    nombre_archivo = f"Transacciones_Energia_MER_{anio_int}{sufijo_pais}{sufijo_mes}.pdf"
+    etq_area = pais_filtro if pais_filtro else "REGIONAL"
+    etq_mes = MESES_CORTOS_ES[mes_limite - 1]
+    if not ruta_salida:
+        ruta_salida = f"Transacciones_Energia_MER_{anio}_{etq_area}_hasta_{etq_mes}.pdf"
 
-    doc = SimpleDocTemplate(
-        nombre_archivo,
-        pagesize=letter,
-        leftMargin=0.55 * inch,
-        rightMargin=0.55 * inch,
-        topMargin=0.42 * inch,
-        bottomMargin=0.40 * inch,
-    )
-
-    elementos = []
-    styles = getSampleStyleSheet()
-    azul_cnd = colors.HexColor("#1F4E78")
-
-    estilo_cnd = ParagraphStyle(
-        "TituloCNDAnual",
-        parent=styles["Normal"],
-        fontName="Times-Bold",
-        fontSize=13,
-        leading=15,
-        textColor=colors.HexColor("#1A1A1A"),
-        alignment=TA_LEFT,
-    )
-
-    logo_img = _construir_logo_cnd(
-        ruta_logo,
-        max_w=2.75 * inch,
-        max_h=0.75 * inch,
-        estilo_fallback=estilo_cnd,
-    )
-    encabezado = Table([[logo_img]], colWidths=[7.3 * inch])
-    encabezado.setStyle(
-        TableStyle([
-            ("ALIGN", (0, 0), (0, 0), "LEFT"),
-            ("VALIGN", (0, 0), (0, 0), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (0, 0), 0),
-            ("RIGHTPADDING", (0, 0), (0, 0), 0),
-            ("TOPPADDING", (0, 0), (0, 0), 0),
-            ("BOTTOMPADDING", (0, 0), (0, 0), 0),
-        ])
-    )
-    elementos.append(encabezado)
-    elementos.append(Spacer(1, 0.12 * inch))
-
-    titulo_tabla = f"TRANSACCIONES DE ENERGÍA EN EL MERCADO ELÉCTRICO REGIONAL {anio_int}"
-    if pais_filtro:
-        titulo_tabla += f" ({pais_filtro})"
-
-    fila_h0 = [titulo_tabla, "", "", "", "", "", ""]
-    fila_h1 = ["Fecha", "COMPRAS DE ENERGÍA", "", "VENTAS DE ENERGÍA", "", "TOTAL", ""]
-    fila_h2 = ["", "CONTRATOS", "OPORTUNIDAD", "CONTRATOS", "OPORTUNIDAD", "COMPRAS", "VENTAS"]
-    fila_h3 = ["", "MWh", "MWh", "MWh", "MWh", "MWh", "MWh"]
-
-    def _fmt_celda(val, es_total_col=False):
+    def _fmt_celda(val):
         if val is None or pd.isna(val):
-            return "-" if es_total_col else ""
-        if abs(float(val)) < 0.0005:
+            return ""
+        v = float(val)
+        if abs(v) < 0.0005:
             return "-"
-        return f"{float(val):,.3f}"
+        return f"{v:,.3f}"
 
-    filas_meses = []
-    for _, r in df_anual.iterrows():
-        filas_meses.append([
-            r["Fecha"],
-            _fmt_celda(r["Compras_Contratos"], False),
-            _fmt_celda(r["Compras_Oportunidad"], False),
-            _fmt_celda(r["Ventas_Contratos"], False),
-            _fmt_celda(r["Ventas_Oportunidad"], False),
-            _fmt_celda(r["Total_Compras"], True),
-            _fmt_celda(r["Total_Ventas"], True),
-        ])
+    st_titulo_doc = ParagraphStyle(
+        "TituloAnualCND",
+        fontName="Helvetica-Bold",
+        fontSize=12.5,
+        leading=15,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#1B365D"),
+    )
+    st_subtitulo_doc = ParagraphStyle(
+        "SubtituloAnualCND",
+        fontName="Helvetica",
+        fontSize=9,
+        leading=11.5,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#444444"),
+    )
+    st_hdr = ParagraphStyle(
+        "HdrTablaAnual",
+        fontName="Helvetica-Bold",
+        fontSize=7.4,
+        leading=9.0,
+        alignment=TA_CENTER,
+        textColor=colors.white,
+    )
 
-    def _sum_col(col_name):
-        s = df_anual[col_name].dropna().sum()
-        return "-" if abs(float(s)) < 0.0005 else f"{float(s):,.3f}"
+    if os.path.exists(ruta_logo):
+        logo_elem = Image(ruta_logo, width=3.5 * cm, height=1.25 * cm)
+    else:
+        logo_elem = Paragraph(
+            "<b>CENTRO NACIONAL<br/>DE DESPACHO</b>",
+            ParagraphStyle("LogoAnualFallback", fontName="Helvetica-Bold", fontSize=8.5, leading=10, alignment=TA_CENTER),
+        )
 
-    fila_total = [
-        "Total",
-        _sum_col("Compras_Contratos"),
-        _sum_col("Compras_Oportunidad"),
-        _sum_col("Ventas_Contratos"),
-        _sum_col("Ventas_Oportunidad"),
-        _sum_col("Total_Compras"),
-        _sum_col("Total_Ventas"),
+    subtitulo_area = f"Área de Control: {pais_filtro}" if pais_filtro else "Mercado Eléctrico Regional (MER)"
+    encabezado_doc = Table(
+        [
+            [
+                logo_elem,
+                [
+                    Paragraph(f"Transacciones de Energía en el MER — Año {anio} (Enero – {etq_mes.capitalize()})", st_titulo_doc),
+                    Paragraph(f"{subtitulo_area} · Cantidades expresadas en MWh", st_subtitulo_doc),
+                ],
+            ]
+        ],
+        colWidths=[4.0 * cm, 14.2 * cm],
+    )
+    encabezado_doc.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 1.2, colors.HexColor("#1B365D")),
+    ]))
+
+    filas_tabla = [
+        [
+            Paragraph("Fecha", st_hdr),
+            Paragraph("COMPRAS<br/>CONTRATOS<br/>(MWh)", st_hdr),
+            Paragraph("COMPRAS<br/>OPORTUNIDAD<br/>(MWh)", st_hdr),
+            Paragraph("VENTAS<br/>CONTRATOS<br/>(MWh)", st_hdr),
+            Paragraph("VENTAS<br/>OPORTUNIDAD<br/>(MWh)", st_hdr),
+            Paragraph("TOTAL<br/>COMPRAS<br/>(MWh)", st_hdr),
+            Paragraph("TOTAL<br/>VENTAS<br/>(MWh)", st_hdr),
+        ]
     ]
 
-    datos_tabla = [fila_h0, fila_h1, fila_h2, fila_h3] + filas_meses + [fila_total]
-    idx_tot = len(datos_tabla) - 1
-
-    anchos = [0.75 * inch, 1.12 * inch, 1.12 * inch, 1.05 * inch, 1.12 * inch, 1.12 * inch, 1.02 * inch]
-    tabla = Table(datos_tabla, colWidths=anchos)
-    tabla.setStyle(
-        TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.75, colors.black),
-            ("BOX", (0, 0), (-1, -1), 1.3, colors.black),
-            ("SPAN", (0, 0), (6, 0)),
-            ("SPAN", (0, 1), (0, 3)),
-            ("SPAN", (1, 1), (2, 1)),
-            ("SPAN", (3, 1), (4, 1)),
-            ("SPAN", (5, 1), (6, 1)),
-            ("BACKGROUND", (0, 0), (-1, 3), azul_cnd),
-            ("TEXTCOLOR", (0, 0), (-1, 3), colors.white),
-            ("FONTNAME", (0, 0), (-1, 3), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (6, 0), 8.5),
-            ("FONTSIZE", (0, 1), (-1, 3), 7.8),
-            ("ALIGN", (0, 0), (-1, 3), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("FONTNAME", (0, 4), (-1, idx_tot - 1), "Helvetica"),
-            ("FONTSIZE", (0, 4), (-1, idx_tot - 1), 7.8),
-            ("ALIGN", (0, 4), (0, idx_tot - 1), "CENTER"),
-            ("ALIGN", (1, 4), (-1, idx_tot - 1), "RIGHT"),
-            ("BACKGROUND", (0, idx_tot), (-1, idx_tot), azul_cnd),
-            ("TEXTCOLOR", (0, idx_tot), (-1, idx_tot), colors.white),
-            ("FONTNAME", (0, idx_tot), (-1, idx_tot), "Helvetica-Bold"),
-            ("FONTSIZE", (0, idx_tot), (-1, idx_tot), 8.0),
-            ("ALIGN", (0, idx_tot), (0, idx_tot), "CENTER"),
-            ("ALIGN", (1, idx_tot), (-1, idx_tot), "RIGHT"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2.1),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.1),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+    for _, r in df_anual.iterrows():
+        filas_tabla.append([
+            r["Fecha"],
+            _fmt_celda(r["Compras_Contratos"]),
+            _fmt_celda(r["Compras_Oportunidad"]),
+            _fmt_celda(r["Ventas_Contratos"]),
+            _fmt_celda(r["Ventas_Oportunidad"]),
+            _fmt_celda(r["Total_Compras"]),
+            _fmt_celda(r["Total_Ventas"]),
         ])
-    )
-    elementos.append(tabla)
-    elementos.append(Spacer(1, 0.14 * inch))
 
-    vals_retiros = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Compras"]]
-    graf_retiros = _crear_grafico_barras_mer(
-        titulo=f"Retiros de energía del MER {anio_int} (MWh)",
-        valores=vals_retiros,
-        ancho_pt=7.3 * inch,
-        alto_pt=2.12 * inch,
-    )
-    elementos.append(graf_retiros)
-    elementos.append(Spacer(1, 0.12 * inch))
+    tot_cc = float(df_anual["Compras_Contratos"].dropna().sum())
+    tot_co = float(df_anual["Compras_Oportunidad"].dropna().sum())
+    tot_vc = float(df_anual["Ventas_Contratos"].dropna().sum())
+    tot_vo = float(df_anual["Ventas_Oportunidad"].dropna().sum())
+    tot_tc = float(df_anual["Total_Compras"].dropna().sum())
+    tot_tv = float(df_anual["Total_Ventas"].dropna().sum())
 
-    vals_inyecciones = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Ventas"]]
-    graf_inyecciones = _crear_grafico_barras_mer(
-        titulo=f"Inyecciones de energía al MER {anio_int} (MWh)",
-        valores=vals_inyecciones,
-        ancho_pt=7.3 * inch,
-        alto_pt=2.12 * inch,
-    )
-    elementos.append(graf_inyecciones)
+    filas_tabla.append([
+        "Total",
+        _fmt_celda(tot_cc),
+        _fmt_celda(tot_co),
+        _fmt_celda(tot_vc),
+        _fmt_celda(tot_vo),
+        _fmt_celda(tot_tc),
+        _fmt_celda(tot_tv),
+    ])
 
+    color_azul_hdr = colors.HexColor("#1B365D")
+    color_zebra = colors.HexColor("#F4F7FA")
+    color_tot_bg = colors.HexColor("#D9E2EC")
+
+    ancho_cols = [1.8 * cm, 2.75 * cm, 2.75 * cm, 2.75 * cm, 2.75 * cm, 2.7 * cm, 2.7 * cm]
+    tabla = Table(filas_tabla, colWidths=ancho_cols, repeatRows=1)
+
+    estilos = [
+        ("BACKGROUND", (0, 0), (-1, 0), color_azul_hdr),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, 0), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+
+        ("FONTNAME", (0, 1), (-1, -2), "Helvetica"),
+        ("FONTSIZE", (0, 1), (-1, -2), 8.2),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 1), (-1, -2), 3.2),
+        ("BOTTOMPADDING", (0, 1), (-1, -2), 3.2),
+
+        ("BACKGROUND", (0, -1), (-1, -1), color_tot_bg),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, -1), (-1, -1), 8.5),
+        ("TOPPADDING", (0, -1), (-1, -1), 4.5),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 4.5),
+
+        ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#1B365D")),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.0, colors.HexColor("#1B365D")),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.2, colors.HexColor("#1B365D")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#B8C4D0")),
+    ]
+
+    for idx_fila in range(2, len(filas_tabla) - 1, 2):
+        estilos.append(("BACKGROUND", (0, idx_fila), (-1, idx_fila), color_zebra))
+
+    tabla.setStyle(TableStyle(estilos))
+
+    buf_retiros = _crear_grafica_barras_apiladas(df_anual, modo="compras")
+    buf_inyecciones = _crear_grafica_barras_apiladas(df_anual, modo="ventas")
+
+    img_retiros = Image(buf_retiros, width=17.8 * cm, height=6.1 * cm)
+    img_inyecciones = Image(buf_inyecciones, width=17.8 * cm, height=6.1 * cm)
+
+    doc = SimpleDocTemplate(
+        ruta_salida,
+        pagesize=letter,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
+        leftMargin=1.7 * cm,
+        rightMargin=1.7 * cm,
+    )
+
+    elementos = [
+        encabezado_doc,
+        Spacer(1, 0.35 * cm),
+        tabla,
+        Spacer(1, 0.4 * cm),
+        KeepTogether([img_retiros, Spacer(1, 0.25 * cm), img_inyecciones]),
+    ]
     doc.build(elementos)
-    return nombre_archivo
+    return ruta_salida
