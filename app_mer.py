@@ -353,7 +353,7 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
             params=params_filtro,
         )
 
-        # Ventas Oportunidad desde CNFFF + O.I. Flexibilidad en TCP (sin restar de Contratos)
+        # Ventas Oportunidad desde CNFFF + O.I. Flexibilidad en TCP
         df_flex_res = ejecutar_consulta_df(
             f"""
             SELECT SUM(ABS(mw_predespachados)) AS mwh
@@ -380,6 +380,7 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
                     ignore_index=True,
                 )
 
+        # Compras ('r') se mantienen íntegras; en Ventas ('i') de TCP se excluyen las flexibilizadas a Oportunidad
         df_tcp_res = ejecutar_consulta_df(
             f"""
             SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
@@ -387,6 +388,12 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
                    SUM(mw_predespachados) AS predespachada
             FROM fact_contratos_tcp
             WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+              AND NOT (
+                  LOWER(TRIM(tipo_transaccion)) = 'i'
+                  AND UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
+                  AND LOWER(TRIM(COALESCE(tipo_oferta, ''))) = 'o.i. flexibilidad'
+                  AND ABS(COALESCE(mw_predespachados, 0)) > 1e-9
+              )
             GROUP BY LOWER(TRIM(tipo_transaccion))
             """,
             c,
