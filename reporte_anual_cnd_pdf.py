@@ -40,12 +40,12 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None):
 
     df_tcp = ejecutar_consulta_df(
         f"""
-        SELECT strftime('%m', fecha_hora) AS mes,
+        SELECT SUBSTR(CAST(fecha_hora AS TEXT), 6, 2) AS mes,
                LOWER(TRIM(tipo_transaccion)) AS tipo,
                SUM(mw_predespachados) AS mwh
         FROM fact_contratos_tcp
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
-        GROUP BY strftime('%m', fecha_hora), LOWER(TRIM(tipo_transaccion))
+        GROUP BY SUBSTR(CAST(fecha_hora AS TEXT), 6, 2), LOWER(TRIM(tipo_transaccion))
         """,
         conn,
         params=params,
@@ -53,12 +53,12 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None):
 
     df_top = ejecutar_consulta_df(
         f"""
-        SELECT strftime('%m', fecha_hora) AS mes,
+        SELECT SUBSTR(CAST(fecha_hora AS TEXT), 6, 2) AS mes,
                LOWER(TRIM(tipo_transaccion)) AS tipo,
                SUM(mw_predespachados) AS mwh
         FROM fact_oportunidad_top
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
-        GROUP BY strftime('%m', fecha_hora), LOWER(TRIM(tipo_transaccion))
+        GROUP BY SUBSTR(CAST(fecha_hora AS TEXT), 6, 2), LOWER(TRIM(tipo_transaccion))
         """,
         conn,
         params=params,
@@ -72,7 +72,7 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None):
         def _val(df, tipo):
             if df.empty or "mes" not in df.columns:
                 return None
-            sub = df[(df["mes"].astype(str).str.zfill(2) == mes_str) & (df["tipo"] == tipo)]
+            sub = df[(df["mes"].astype(str).str.strip().str.zfill(2) == mes_str) & (df["tipo"] == tipo)]
             if sub.empty or pd.isna(sub["mwh"].iloc[0]):
                 return None
             return float(sub["mwh"].iloc[0])
