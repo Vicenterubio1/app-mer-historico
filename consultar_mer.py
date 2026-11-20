@@ -26,6 +26,14 @@ MESES_CORTOS_ES = {
     7: "jul", 8: "ago", 9: "sep", 10: "oct", 11: "nov", 12: "dic"
 }
 
+# Regla MER: En TCP, cuando Tipo Contrato = 'CNFFF' y Tipo Oferta = 'O.I. Flexibilidad'
+# con MW Predespachados != 0, mantiene su compra en Contratos y se suma como Venta en Oportunidad.
+CONDICION_FLEX_CNFFF_SQL = """
+    UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
+    AND LOWER(TRIM(COALESCE(tipo_oferta, ''))) = 'o.i. flexibilidad'
+    AND ABS(COALESCE(mw_predespachados, 0)) > 1e-9
+"""
+
 
 def limpiar_codigo(val):
     if pd.isna(val):
@@ -82,6 +90,17 @@ def construir_df_balance_horario(conn, f_ini, f_fin, pais_cod=None):
         GROUP BY date(fecha_hora), strftime('%H', fecha_hora), LOWER(TRIM(tipo_transaccion))
     """, conn, params=params)
 
+    # Ventas de Oportunidad provenientes de CNFFF + O.I. Flexibilidad en TCP
+    df_flex_ventas = ejecutar_consulta_df(f"""
+        SELECT date(fecha_hora) AS fecha,
+               strftime('%H', fecha_hora) AS hora,
+               SUM(ABS(mw_predespachados)) AS mwh
+        FROM fact_contratos_tcp
+        WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+          AND {CONDICION_FLEX_CNFFF_SQL}
+        GROUP BY date(fecha_hora), strftime('%H', fecha_hora)
+    """, conn, params=params)
+
     fechas = pd.date_range(f_ini, f_fin, freq="D").strftime("%Y-%m-%d").tolist()
     horas = [f"{h:02d}" for h in range(24)]
     grid = pd.MultiIndex.from_product([fechas, horas], names=["fecha", "hora"]).to_frame().reset_index(drop=True)
@@ -101,6 +120,13 @@ def construir_df_balance_horario(conn, f_ini, f_fin, pais_cod=None):
     extraer_serie(df_tcp, "i", "iny_contratos")
     extraer_serie(df_top, "i", "iny_oportunidad")
 
+    if not df_flex_ventas.empty:
+        sub_fl = df_flex_ventas[["fecha", "hora", "mwh"]].rename(columns={"mwh": "flex_ventas_mwh"})
+        sub_fl["fecha"] = sub_fl["fecha"].astype(str).str[:10]
+        sub_fl["hora"] = sub_fl["hora"].astype(str).str.zfill(2)
+        merged_fl = grid.merge(sub_fl, on=["fecha", "hora"], how="left")
+        grid["iny_oportunidad"] = grid["iny_oportunidad"] + merged_fl["flex_ventas_mwh"].fillna(0.0)
+
     return grid
 
 
@@ -118,6 +144,7 @@ def construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod=None):
                TRIM(codigo_agente) AS agente_nacional,
                TRIM(agente_contraparte) AS agente_contraparte,
                UPPER(TRIM(tipo_contrato)) AS tipo_contrato,
+               COALESCE(TRIM(tipo_oferta), '') AS tipo_oferta,
                CASE LOWER(TRIM(tipo_transaccion))
                    WHEN 'r' THEN 'Compra (Retiro)'
                    WHEN 'i' THEN 'Venta (Inyección)'
@@ -131,7 +158,7 @@ def construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod=None):
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
         GROUP BY date(fecha_hora), strftime('%H', fecha_hora), pais,
                  TRIM(codigo_agente), TRIM(agente_contraparte),
-                 UPPER(TRIM(tipo_contrato)),
+                 UPPER(TRIM(tipo_contrato)), COALESCE(TRIM(tipo_oferta), ''),
                  CASE LOWER(TRIM(tipo_transaccion))
                      WHEN 'r' THEN 'Compra (Retiro)'
                      WHEN 'i' THEN 'Venta (Inyección)'
@@ -150,6 +177,7 @@ def construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod=None):
         "agente_nacional": "Agente_Nacional",
         "agente_contraparte": "Agente_Contraparte",
         "tipo_contrato": "Tipo_Contrato",
+        "tipo_oferta": "Tipo_Oferta",
         "operacion": "Operacion",
         "mwh_requeridos": "MWh_Requeridos",
         "mwh_declarados": "MWh_Declarados",
@@ -165,7 +193,7 @@ def construir_df_tcp_agente_contraparte(conn, f_ini, f_fin, pais_cod=None):
     cols = [
         "Fecha", "Hora", "Pais", "Agente_Nacional", "Nombre_Agente",
         "Agente_Contraparte", "Nombre_Contraparte", "Tipo_Contrato",
-        "Operacion", "MWh_Requeridos", "MWh_Declarados",
+        "Tipo_Oferta", "Operacion", "MWh_Requeridos", "MWh_Declarados",
         "Precio_ExAnte_USD", "MWh_Predespachados"
     ]
     return df[cols]
@@ -178,7 +206,7 @@ def construir_df_top_agente_hora(conn, f_ini, f_fin, pais_cod=None):
         cond_pais = " AND pais = ?"
         params.append(pais_cod)
 
-    df = ejecutar_consulta_df(f"""
+    df_top = ejecutar_consulta_df(f"""
         SELECT date(fecha_hora) AS fecha,
                strftime('%H', fecha_hora) || ':00' AS hora,
                pais AS pais,
@@ -201,11 +229,29 @@ def construir_df_top_agente_hora(conn, f_ini, f_fin, pais_cod=None):
                      WHEN 'i' THEN 'Venta (Inyección)'
                      ELSE tipo_transaccion
                  END
-        ORDER BY fecha, hora, agente_nacional
     """, conn, params=params)
 
+    df_flex = ejecutar_consulta_df(f"""
+        SELECT date(fecha_hora) AS fecha,
+               strftime('%H', fecha_hora) || ':00' AS hora,
+               pais AS pais,
+               TRIM(codigo_agente) AS agente_nacional,
+               'Venta (Inyección) [Flex. CNFFF]' AS operacion,
+               SUM(mw_requerida) AS mwh_requeridos,
+               SUM(mw_declarada) AS mwh_declarados,
+               AVG(precio_exante) AS precio_exante_usd,
+               SUM(ABS(mw_predespachados)) AS mwh_predespachados
+        FROM fact_contratos_tcp
+        WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+          AND {CONDICION_FLEX_CNFFF_SQL}
+        GROUP BY date(fecha_hora), strftime('%H', fecha_hora), pais, TRIM(codigo_agente)
+    """, conn, params=params)
+
+    df = pd.concat([df_top, df_flex], ignore_index=True)
     if df.empty:
         return df
+
+    df = df.sort_values(by=["fecha", "hora", "agente_nacional", "operacion"]).reset_index(drop=True)
 
     df = df.rename(columns={
         "fecha": "Fecha",
