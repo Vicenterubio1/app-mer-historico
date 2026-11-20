@@ -102,7 +102,7 @@ def construir_df_anual_mer(conn, anio, pais_filtro=None):
     return pd.DataFrame(filas)
 
 
-def _construir_logo_cnd(ruta_logo, max_w, max_h):
+def _construir_logo_cnd(ruta_logo, max_w, max_h, estilo_fallback=None):
     if ruta_logo and os.path.exists(ruta_logo):
         try:
             lector = ImageReader(ruta_logo)
@@ -112,6 +112,8 @@ def _construir_logo_cnd(ruta_logo, max_w, max_h):
                 return RLImage(ruta_logo, width=iw * escala, height=ih * escala)
         except Exception:
             pass
+    if estilo_fallback is not None:
+        return Paragraph("<b>CENTRO NACIONAL<br/>DE DESPACHO</b>", estilo_fallback)
     return Spacer(1, 1)
 
 
@@ -227,7 +229,7 @@ def generar_pdf_transacciones_anuales_mer(
         pagesize=letter,
         leftMargin=0.55 * inch,
         rightMargin=0.55 * inch,
-        topMargin=0.45 * inch,
+        topMargin=0.42 * inch,
         bottomMargin=0.40 * inch,
     )
 
@@ -235,6 +237,7 @@ def generar_pdf_transacciones_anuales_mer(
     styles = getSampleStyleSheet()
     azul_cnd = colors.HexColor("#1F4E78")
 
+    # 1. Encabezado Institucional (Solo logo completo ampliado y alineado a la izquierda)
     estilo_cnd = ParagraphStyle(
         "TituloCNDAnual",
         parent=styles["Normal"],
@@ -245,26 +248,27 @@ def generar_pdf_transacciones_anuales_mer(
         alignment=TA_LEFT,
     )
 
-    logo_img = _construir_logo_cnd(ruta_logo, max_w=1.25 * inch, max_h=0.68 * inch)
-    encabezado = Table(
-        [[logo_img, Paragraph("CENTRO NACIONAL<br/>DE DESPACHO", estilo_cnd)]],
-        colWidths=[1.35 * inch, 5.95 * inch],
+    logo_img = _construir_logo_cnd(
+        ruta_logo,
+        max_w=2.75 * inch,
+        max_h=0.75 * inch,
+        estilo_fallback=estilo_cnd,
     )
+    encabezado = Table([[logo_img]], colWidths=[7.3 * inch])
     encabezado.setStyle(
         TableStyle([
-            ("LINEAFTER", (0, 0), (0, 0), 1.4, colors.HexColor("#262626")),
             ("ALIGN", (0, 0), (0, 0), "LEFT"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("VALIGN", (0, 0), (0, 0), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (0, 0), 0),
-            ("RIGHTPADDING", (0, 0), (0, 0), 10),
-            ("LEFTPADDING", (1, 0), (1, 0), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (0, 0), 0),
+            ("TOPPADDING", (0, 0), (0, 0), 0),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 0),
         ])
     )
     elementos.append(encabezado)
-    elementos.append(Spacer(1, 0.14 * inch))
+    elementos.append(Spacer(1, 0.12 * inch))
 
+    # 2. Tabla Principal Azul Marino (ene - dic + Total)
     titulo_tabla = f"TRANSACCIONES DE ENERGÍA EN EL MERCADO ELÉCTRICO REGIONAL {anio_int}"
     if pais_filtro:
         titulo_tabla += f" ({pais_filtro})"
@@ -347,6 +351,7 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(tabla)
     elementos.append(Spacer(1, 0.14 * inch))
 
+    # 3. Gráfica 1: Retiros de energía del MER {AÑO} (MWh)
     vals_retiros = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Compras"]]
     graf_retiros = _crear_grafico_barras_mer(
         titulo=f"Retiros de energía del MER {anio_int} (MWh)",
@@ -357,6 +362,7 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(graf_retiros)
     elementos.append(Spacer(1, 0.12 * inch))
 
+    # 4. Gráfica 2: Inyecciones de energía al MER {AÑO} (MWh)
     vals_inyecciones = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Ventas"]]
     graf_inyecciones = _crear_grafico_barras_mer(
         titulo=f"Inyecciones de energía al MER {anio_int} (MWh)",
