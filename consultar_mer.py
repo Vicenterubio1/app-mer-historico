@@ -27,7 +27,8 @@ MESES_CORTOS_ES = {
 }
 
 # Regla MER: En TCP, cuando Tipo Contrato = 'CNFFF' y Tipo Oferta = 'O.I. Flexibilidad'
-# con MW Predespachados != 0, mantiene su compra en Contratos y se suma como Venta en Oportunidad.
+# con MW Predespachados != 0, esa energía flexibilizada se asigna a Ventas de Oportunidad
+# (sin restar las compras 'r' de Contratos, pero sin duplicarla en Ventas Contratos 'i').
 CONDICION_FLEX_CNFFF_SQL = """
     UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
     AND LOWER(TRIM(COALESCE(tipo_oferta, ''))) = 'o.i. flexibilidad'
@@ -70,6 +71,7 @@ def construir_df_balance_horario(conn, f_ini, f_fin, pais_cod=None):
         cond_pais = " AND pais = ?"
         params.append(pais_cod)
 
+    # Compras ('r') se mantienen íntegras; en Ventas ('i') de TCP se excluyen las flexibilizadas a Oportunidad
     df_tcp = ejecutar_consulta_df(f"""
         SELECT date(fecha_hora) AS fecha,
                strftime('%H', fecha_hora) AS hora,
@@ -77,6 +79,7 @@ def construir_df_balance_horario(conn, f_ini, f_fin, pais_cod=None):
                SUM(mw_predespachados) AS mwh
         FROM fact_contratos_tcp
         WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+          AND NOT (LOWER(TRIM(tipo_transaccion)) = 'i' AND ({CONDICION_FLEX_CNFFF_SQL}))
         GROUP BY date(fecha_hora), strftime('%H', fecha_hora), LOWER(TRIM(tipo_transaccion))
     """, conn, params=params)
 
@@ -286,7 +289,7 @@ def construir_df_mensual_cnd(conn, anio: int, mes: int, agente_nacional: str, ag
     ag_nac_clean = agente_nacional.strip()
     pais_ag = PREFIJO_PAIS.get(ag_nac_clean[0], "") if ag_nac_clean else ""
 
-    sql = """
+    sql = f"""
         SELECT fecha_operacion AS fecha,
                UPPER(TRIM(tipo_contrato)) AS tipo_contrato,
                SUM(mw_predespachados) AS mwh
@@ -295,6 +298,7 @@ def construir_df_mensual_cnd(conn, anio: int, mes: int, agente_nacional: str, ag
           AND TRIM(codigo_agente) = ?
           AND TRIM(agente_contraparte) = ?
           AND LOWER(TRIM(tipo_transaccion)) = ?
+          AND NOT (LOWER(TRIM(tipo_transaccion)) = 'i' AND ({CONDICION_FLEX_CNFFF_SQL}))
     """
     params = [f_ini, f_fin, ag_nac_clean, agente_contraparte.strip(), tipo_transaccion.lower().strip()]
     if pais_ag:
