@@ -1,4 +1,4 @@
-﻿import os
+import os
 import io
 import re
 import zipfile
@@ -56,8 +56,28 @@ def calcular_hash_bytes(data_bytes):
     return hashlib.sha256(data_bytes).hexdigest()
 
 
+def asegurar_columna_tipo_oferta(conn):
+    """Agrega la columna tipo_oferta a fact_contratos_tcp si aún no existe (SQLite y PostgreSQL)."""
+    cur = conn.cursor()
+    try:
+        if es_postgres(conn):
+            cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
+            cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN IF NOT EXISTS tipo_oferta TEXT DEFAULT '';")
+        else:
+            cur.execute("PRAGMA table_info(fact_contratos_tcp);")
+            cols = [r[1].lower() for r in cur.fetchall()]
+            if "tipo_oferta" not in cols:
+                cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN tipo_oferta TEXT DEFAULT '';")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        cur.close()
+
+
 def inicializar_bd(conn):
     inicializar_esquema_completo(conn)
+    asegurar_columna_tipo_oferta(conn)
     cur = conn.cursor()
     if es_postgres(conn):
         cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
@@ -223,6 +243,11 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
     c_cp = buscar_col(["contraparte"])
     c_tipo_tr = buscar_col(["tipo transa", "transacción", "transaccion"])
     c_tipo_ct = buscar_col(["tipo contrato"])
+    c_tipo_of = buscar_col(["tipo oferta", "oferta"])
+    # Respaldo posicional por si la columna L tiene encabezado abreviado
+    if not c_tipo_of and len(df.columns) > 11:
+        c_tipo_of = df.columns[11]
+
     c_req = buscar_col(["requerida"])
     c_dec = buscar_col(["declarada"])
     c_pre = buscar_col(["precio"])
@@ -239,6 +264,9 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
         if not h_str or not ag or tipo_tr not in ("i", "r"):
             continue
 
+        val_of = row[c_tipo_of] if c_tipo_of else ""
+        tipo_of_txt = "" if pd.isna(val_of) else str(val_of).strip()
+
         registros.append({
             "fecha_operacion": fecha_op,
             "fecha_hora": f"{fecha_op} {h_str}:00:00",
@@ -248,6 +276,7 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
             "punto_medida": str(row[c_pm] or "").strip() if c_pm else "",
             "codigo_contrato": str(row[c_cont] or "").strip() if c_cont else "",
             "tipo_contrato": str(row[c_tipo_ct] or "").strip() if c_tipo_ct else "",
+            "tipo_oferta": tipo_of_txt,
             "agente_contraparte": str(row[c_cp] or "").strip() if c_cp else "",
             "tipo_transaccion": tipo_tr,
             "mw_requerida": float(pd.to_numeric(row[c_req], errors="coerce") or 0.0) if c_req else 0.0,
@@ -389,23 +418,47 @@ def procesar_excel_en_memoria(conn, nombre_excel, contenido_bytes, ts_publicacio
     )
     existente = cur.fetchone()
 
+    xl = None
+    df_tcp_pre = None
+
     if existente:
         arch_prev, hash_prev, ts_prev = existente
         if hash_prev == hash_actual:
-            print(f"[SKIP] {nombre_excel} (idéntico al ya cargado)")
-            cur.close()
-            return
-        if ts_prev and ts_publicacion_eor and ts_publicacion_eor < ts_prev:
+            # Verificar si faltaba poblar tipo_oferta en registros cargados antes de la actualización
+            ejecutar_sql(
+                cur,
+                """
+                SELECT COUNT(*) FROM fact_contratos_tcp
+                WHERE fecha_operacion = ? AND pais = ? AND COALESCE(TRIM(tipo_oferta), '') != ''
+                """,
+                (fecha_op, pais),
+            )
+            tiene_of = (cur.fetchone()[0] or 0) > 0
+            if tiene_of:
+                print(f"[SKIP] {nombre_excel} (idéntico al ya cargado)")
+                cur.close()
+                return
+            xl = pd.ExcelFile(io.BytesIO(contenido_bytes))
+            df_tcp_pre = parsear_hoja_tcp(xl, fecha_op, pais)
+            if df_tcp_pre.empty or (df_tcp_pre["tipo_oferta"].str.strip() == "").all():
+                print(f"[SKIP] {nombre_excel} (idéntico al ya cargado)")
+                cur.close()
+                return
+            print(f"[UPDATE - Columna Tipo Oferta] Completando Tipo Oferta en {fecha_op} {pais} ({osom})...")
+        elif ts_prev and ts_publicacion_eor and ts_publicacion_eor < ts_prev:
             print(f"[SKIP - Versión antigua] {nombre_excel} ({ts_publicacion_eor}) es anterior a {arch_prev} ({ts_prev})")
             cur.close()
             return
-        print(f"[UPDATE] Actualizando {fecha_op} {pais} ({osom}) con versión más reciente ({ts_publicacion_eor})...")
+        else:
+            print(f"[UPDATE] Actualizando {fecha_op} {pais} ({osom}) con versión más reciente ({ts_publicacion_eor})...")
     else:
         print(f"[NUEVO] Cargando {fecha_op} {pais} ({osom}) - Publicación EOR: {ts_publicacion_eor}")
 
-    xl = pd.ExcelFile(io.BytesIO(contenido_bytes))
+    if xl is None:
+        xl = pd.ExcelFile(io.BytesIO(contenido_bytes))
+
     df_pex = parsear_hoja_pexante(xl, fecha_op)
-    df_tcp = parsear_hoja_tcp(xl, fecha_op, pais)
+    df_tcp = df_tcp_pre if df_tcp_pre is not None else parsear_hoja_tcp(xl, fecha_op, pais)
     df_top = parsear_hoja_top(xl, fecha_op, pais)
     df_rtr = parsear_hoja_rtr(xl, fecha_op)
 
@@ -485,4 +538,4 @@ def procesar_carpeta(ruta_carpeta="."):
 
 
 if __name__ == "__main__":
-    procesar_carpeta(".")
+    procesar_carpeta(".")﻿
