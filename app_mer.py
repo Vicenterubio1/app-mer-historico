@@ -353,6 +353,33 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
             params=params_filtro,
         )
 
+        # Ventas Oportunidad desde CNFFF + O.I. Flexibilidad en TCP (sin restar de Contratos)
+        df_flex_res = ejecutar_consulta_df(
+            f"""
+            SELECT SUM(ABS(mw_predespachados)) AS mwh
+            FROM fact_contratos_tcp
+            WHERE date(fecha_hora) BETWEEN ? AND ? {cond_pais}
+              AND UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
+              AND LOWER(TRIM(COALESCE(tipo_oferta, ''))) = 'o.i. flexibilidad'
+              AND ABS(COALESCE(mw_predespachados, 0)) > 1e-9
+            """,
+            c,
+            params=params_filtro,
+        )
+        flex_ventas_kpi = (
+            float(df_flex_res["mwh"].iloc[0] or 0.0)
+            if not df_flex_res.empty and pd.notna(df_flex_res["mwh"].iloc[0])
+            else 0.0
+        )
+        if flex_ventas_kpi > 0:
+            if not df_top_res.empty and "i" in df_top_res["tipo"].values:
+                df_top_res.loc[df_top_res["tipo"] == "i", "predespachada"] += flex_ventas_kpi
+            else:
+                df_top_res = pd.concat(
+                    [df_top_res, pd.DataFrame([{"tipo": "i", "declarada": 0.0, "predespachada": flex_ventas_kpi}])],
+                    ignore_index=True,
+                )
+
         df_tcp_res = ejecutar_consulta_df(
             f"""
             SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
@@ -992,6 +1019,7 @@ with tab_reportes:
                         "Agente_Contraparte": "",
                         "Nombre_Contraparte": "",
                         "Tipo_Contrato": "",
+                        "Tipo_Oferta": "",
                         "Operacion": "",
                         "MWh_Requeridos": df_tcp_filtrado["MWh_Requeridos"].sum(),
                         "MWh_Declarados": df_tcp_filtrado["MWh_Declarados"].sum(),
