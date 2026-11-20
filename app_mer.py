@@ -49,7 +49,7 @@ def asegurar_esquema(conn):
 
 
 # ==========================================
-# CONTROL DE ACCESO TOTAL (st.secrets)
+# CONTROL DE ACCESO PERSONALIZADO (st.secrets)
 # ==========================================
 def obtener_secreto(nombre_clave):
     try:
@@ -60,45 +60,87 @@ def obtener_secreto(nombre_clave):
     return os.environ.get(nombre_clave, "").strip()
 
 
+def obtener_usuarios_configurados():
+    """Lee el diccionario [usuarios] desde st.secrets."""
+    try:
+        if "usuarios" in st.secrets:
+            return dict(st.secrets["usuarios"])
+    except Exception:
+        pass
+    return {}
+
+
 def verificar_clave(clave_ingresada, clave_real):
     if not clave_real:
         return False
     return hmac.compare_digest(str(clave_ingresada), str(clave_real))
 
 
-if "rol_usuario" not in st.session_state:
-    st.session_state["rol_usuario"] = None  # None | "visitante" | "admin"
+if "usuario_activo" not in st.session_state:
+    st.session_state["usuario_activo"] = None  # dict: {"usuario": ..., "nombre": ..., "rol": ...}
 
 
 def pantalla_login():
-    clave_admin = obtener_secreto("ADMIN_PASSWORD")
-    clave_visitante = obtener_secreto("VISITOR_PASSWORD")
+    usuarios_cfg = obtener_usuarios_configurados()
+    clave_admin_legacy = obtener_secreto("ADMIN_PASSWORD")
+    clave_visitante_legacy = obtener_secreto("VISITOR_PASSWORD")
 
-    # Si no se han configurado secretos en el entorno, permite acceso local sin bloqueo
-    if not clave_admin and not clave_visitante:
-        st.session_state["rol_usuario"] = "admin"
+    # Si no hay usuarios ni claves configuradas, permite acceso local sin bloqueo
+    if not usuarios_cfg and not clave_admin_legacy and not clave_visitante_legacy:
+        st.session_state["usuario_activo"] = {
+            "usuario": "local",
+            "nombre": "Administrador Local",
+            "rol": "admin",
+        }
         return True
 
-    if st.session_state["rol_usuario"] in ("visitante", "admin"):
+    if st.session_state["usuario_activo"] is not None:
         return True
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_izq, col_centro, col_der = st.columns([1, 1.4, 1])
     with col_centro:
         st.title("⚡ Sistema Histórico MER")
-        st.caption("Mercado Eléctrico Regional · Acceso Restringido")
-        with st.form("form_login_general", clear_on_submit=True):
-            pwd = st.text_input("Contraseña de acceso:", type="password", placeholder="Ingresa tu contraseña...")
+        st.caption("Mercado Eléctrico Regional · Acceso Personalizado")
+        with st.form("form_login_personal", clear_on_submit=True):
+            usr_in = st.text_input("Usuario:", placeholder="Ej. vicente").strip().lower()
+            pwd_in = st.text_input("Contraseña:", type="password", placeholder="Ingresa tu contraseña...")
             ingresar = st.form_submit_button("🔓 Ingresar al Sistema", type="primary", use_container_width=True)
+
             if ingresar:
-                if verificar_clave(pwd, clave_admin):
-                    st.session_state["rol_usuario"] = "admin"
+                # 1. Validar contra cuentas nominales [usuarios.<id>]
+                if usr_in and usr_in in usuarios_cfg:
+                    datos_u = usuarios_cfg[usr_in]
+                    pwd_real = str(datos_u.get("password", "")).strip()
+                    if verificar_clave(pwd_in, pwd_real):
+                        rol_u = str(datos_u.get("rol", "visitante")).strip().lower()
+                        if rol_u not in ("admin", "visitante"):
+                            rol_u = "visitante"
+                        st.session_state["usuario_activo"] = {
+                            "usuario": usr_in,
+                            "nombre": str(datos_u.get("nombre", usr_in)).strip(),
+                            "rol": rol_u,
+                        }
+                        st.rerun()
+                    else:
+                        st.error("Usuario o contraseña incorrectos.")
+                # 2. Respaldo por si aún usas ADMIN_PASSWORD / VISITOR_PASSWORD sin usuario
+                elif not usr_in and verificar_clave(pwd_in, clave_admin_legacy):
+                    st.session_state["usuario_activo"] = {
+                        "usuario": "admin",
+                        "nombre": "Administrador",
+                        "rol": "admin",
+                    }
                     st.rerun()
-                elif verificar_clave(pwd, clave_visitante):
-                    st.session_state["rol_usuario"] = "visitante"
+                elif not usr_in and verificar_clave(pwd_in, clave_visitante_legacy):
+                    st.session_state["usuario_activo"] = {
+                        "usuario": "visitante",
+                        "nombre": "Usuario Consulta",
+                        "rol": "visitante",
+                    }
                     st.rerun()
                 else:
-                    st.error("Contraseña incorrecta. Verifica tus credenciales.")
+                    st.error("Usuario o contraseña incorrectos. Verifica tus credenciales.")
     return False
 
 
@@ -106,7 +148,8 @@ def pantalla_login():
 if not pantalla_login():
     st.stop()
 
-es_admin = st.session_state["rol_usuario"] == "admin"
+usuario_actual = st.session_state["usuario_activo"]
+es_admin = usuario_actual["rol"] == "admin"
 
 
 # ==========================================
@@ -427,17 +470,21 @@ if "uploader_zip_key" not in st.session_state:
 st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
 st.caption("Ingesta de Predespachos (PUB004), Control de Versiones, Catálogo y Reportería Horaria / CND")
 
+# Tarjeta de bienvenida personalizada en la barra lateral
+rol_badge = "Administrador" if es_admin else "Consulta"
+st.sidebar.markdown(f"### 👋 Hola, **{usuario_actual['nombre']}**")
+st.sidebar.caption(f"Usuario: `{usuario_actual['usuario']}` · Rol: **{rol_badge}**")
+
+if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
+    st.session_state["usuario_activo"] = None
+    st.rerun()
+
+st.sidebar.divider()
+
 if usa_pg:
     st.sidebar.success(f"☁️ Conectado a Supabase (Esquema `{ESQUEMA_PG}`)")
 else:
     st.sidebar.info("💻 Conectado a SQLite Local")
-
-# Estado de sesión y cierre de sesión en la barra lateral
-rol_etiqueta = "Administrador (Lectura y Escritura)" if es_admin else "Visitante (Solo Consulta)"
-st.sidebar.caption(f"👤 Perfil activo: **{rol_etiqueta}**")
-if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
-    st.session_state["rol_usuario"] = None
-    st.rerun()
 
 st.sidebar.header("🔍 Filtros de Consulta")
 
@@ -476,14 +523,22 @@ else:
     f_ini, f_fin, pais_cod = None, None, None
 
 # ==========================================
-# PESTAÑAS PRINCIPALES
+# PESTAÑAS PRINCIPALES (SEGÚN ROL)
 # ==========================================
-tab_reportes, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
-    "📊 Reportería y Balance MER",
-    "🏷️ Catálogo de Nodos y Agentes",
-    "📥 Ingreso de Archivos (ZIP)",
-    "🗂️ Auditoría de Base de Datos",
-])
+if es_admin:
+    tab_reportes, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
+        "📊 Reportería y Balance MER",
+        "🏷️ Catálogo de Nodos y Agentes",
+        "📥 Ingreso de Archivos (ZIP)",
+        "🗂️ Auditoría de Base de Datos",
+    ])
+else:
+    tab_reportes, tab_catalogo, tab_auditoria = st.tabs([
+        "📊 Reportería y Balance MER",
+        "🏷️ Catálogo de Nodos y Agentes",
+        "🗂️ Auditoría de Base de Datos",
+    ])
+    tab_ingesta = None
 
 # ------------------------------------------
 # PESTAÑA 1: REPORTERÍA Y VISUALIZACIÓN
@@ -954,14 +1009,14 @@ with tab_reportes:
                 )
 
 # ------------------------------------------
-# PESTAÑA 2: CATÁLOGO EDITABLE DE NODOS Y AGENTES
+# PESTAÑA 2: CATÁLOGO DE NODOS Y AGENTES
 # ------------------------------------------
 with tab_catalogo:
-    st.subheader("🏷️ Administración de Nombres Reales (Nodos y Agentes)")
-    st.markdown("Los códigos se detectan automáticamente de tus archivos `PUB004` (incluyendo los Agentes Contraparte).")
+    st.subheader("🏷️ Catálogo de Nombres Reales (Nodos y Agentes)")
+    st.markdown("Los códigos se detectan automáticamente de los archivos `PUB004` (incluyendo los Agentes Contraparte).")
 
     if not es_admin:
-        st.info("🔒 Tu sesión es de **Visitante (Solo Consulta)**. Inicia sesión con contraseña de Administrador para editar nombres o importar desde Excel.")
+        st.info(f"🔒 Sesión de **{usuario_actual['nombre']}** (Solo Consulta). Únicamente usuarios administradores pueden editar nombres.")
 
     subtab_nodos, subtab_agentes, subtab_excel_cat = st.tabs([
         "🔌 Catálogo de Nodos Eléctricos",
@@ -1140,14 +1195,11 @@ with tab_catalogo:
                 st.rerun()
 
 # ------------------------------------------
-# PESTAÑA 3: INGRESO DE ARCHIVOS (ETL)
+# PESTAÑA 3: INGRESO DE ARCHIVOS (SOLO ADMIN)
 # ------------------------------------------
-with tab_ingesta:
-    st.subheader("Cargar Predespachos Regionales (PUB004-*.zip)")
-
-    if not es_admin:
-        st.warning("🔒 Acceso restringido. Tu sesión es de **Visitante (Solo Consulta)**; inicia sesión con la contraseña de Administrador para cargar archivos ZIP.")
-    else:
+if es_admin and tab_ingesta is not None:
+    with tab_ingesta:
+        st.subheader("Cargar Predespachos Regionales (PUB004-*.zip)")
         st.markdown("""
         Arrastra aquí los archivos `.zip` descargados del EOR. El sistema detectará automáticamente:
 - **Nuevos días operativos** (`[NUEVO]`)
