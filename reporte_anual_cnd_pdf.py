@@ -1,5 +1,4 @@
 import os
-import io
 import math
 import pandas as pd
 
@@ -17,7 +16,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
-from reportlab.graphics.shapes import Drawing, Rect, String, Line
+from reportlab.graphics.shapes import Drawing, Rect, String
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 
 from db_mer import ejecutar_consulta_df
@@ -124,10 +123,8 @@ def _crear_grafico_barras_mer(titulo, valores, ancho_pt=525, alto_pt=152):
     texto_gris = colors.HexColor("#595959")
 
     d = Drawing(ancho_pt, alto_pt)
-    # Marco exterior gris suave
     d.add(Rect(0, 0, ancho_pt, alto_pt, strokeColor=borde_caja, fillColor=colors.white, strokeWidth=0.8))
 
-    # Título centrado arriba
     d.add(
         String(
             ancho_pt / 2.0,
@@ -143,7 +140,6 @@ def _crear_grafico_barras_mer(titulo, valores, ancho_pt=525, alto_pt=152):
     vals_clean = [max(0.0, float(v or 0.0)) for v in valores]
     max_val = max(vals_clean) if vals_clean else 0.0
 
-    # Escala redondeada limpia en eje Y
     if max_val <= 0:
         y_max = 100.0
         y_step = 20.0
@@ -196,7 +192,6 @@ def _crear_grafico_barras_mer(titulo, valores, ancho_pt=525, alto_pt=152):
     bc.bars[0].fillColor = azul_cnd
     bc.bars[0].strokeColor = azul_cnd
 
-    # Etiquetas con fondo azul marino y número blanco encima de cada barra
     bc.barLabels.nudge = 7
     bc.barLabelFormat = lambda v: f"{int(round(v)):,}"
     bc.barLabels.fontName = "Helvetica-Bold"
@@ -240,7 +235,6 @@ def generar_pdf_transacciones_anuales_mer(
     styles = getSampleStyleSheet()
     azul_cnd = colors.HexColor("#1F4E78")
 
-    # 1. Encabezado Institucional (Logo + línea vertical + CENTRO NACIONAL DE DESPACHO)
     estilo_cnd = ParagraphStyle(
         "TituloCNDAnual",
         parent=styles["Normal"],
@@ -271,7 +265,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(encabezado)
     elementos.append(Spacer(1, 0.14 * inch))
 
-    # 2. Tabla Principal Azul Marino (ene - dic + Total)
     titulo_tabla = f"TRANSACCIONES DE ENERGÍA EN EL MERCADO ELÉCTRICO REGIONAL {anio_int}"
     if pais_filtro:
         titulo_tabla += f" ({pais_filtro})"
@@ -323,13 +316,11 @@ def generar_pdf_transacciones_anuales_mer(
         TableStyle([
             ("GRID", (0, 0), (-1, -1), 0.75, colors.black),
             ("BOX", (0, 0), (-1, -1), 1.3, colors.black),
-            # Spans de encabezados
             ("SPAN", (0, 0), (6, 0)),
             ("SPAN", (0, 1), (0, 3)),
             ("SPAN", (1, 1), (2, 1)),
             ("SPAN", (3, 1), (4, 1)),
             ("SPAN", (5, 1), (6, 1)),
-            # Estilos encabezados azul marino
             ("BACKGROUND", (0, 0), (-1, 3), azul_cnd),
             ("TEXTCOLOR", (0, 0), (-1, 3), colors.white),
             ("FONTNAME", (0, 0), (-1, 3), "Helvetica-Bold"),
@@ -337,19 +328,16 @@ def generar_pdf_transacciones_anuales_mer(
             ("FONTSIZE", (0, 1), (-1, 3), 7.8),
             ("ALIGN", (0, 0), (-1, 3), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            # Cuerpo meses
             ("FONTNAME", (0, 4), (-1, idx_tot - 1), "Helvetica"),
             ("FONTSIZE", (0, 4), (-1, idx_tot - 1), 7.8),
             ("ALIGN", (0, 4), (0, idx_tot - 1), "CENTER"),
             ("ALIGN", (1, 4), (-1, idx_tot - 1), "RIGHT"),
-            # Fila Total azul marino
             ("BACKGROUND", (0, idx_tot), (-1, idx_tot), azul_cnd),
             ("TEXTCOLOR", (0, idx_tot), (-1, idx_tot), colors.white),
             ("FONTNAME", (0, idx_tot), (-1, idx_tot), "Helvetica-Bold"),
             ("FONTSIZE", (0, idx_tot), (-1, idx_tot), 8.0),
             ("ALIGN", (0, idx_tot), (0, idx_tot), "CENTER"),
             ("ALIGN", (1, idx_tot), (-1, idx_tot), "RIGHT"),
-            # Padding compacto para que quepan tabla + 2 gráficas en 1 página
             ("TOPPADDING", (0, 0), (-1, -1), 2.1),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 2.1),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -359,7 +347,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(tabla)
     elementos.append(Spacer(1, 0.14 * inch))
 
-    # 3. Gráfica 1: Retiros de energía del MER {AÑO} (MWh)
     vals_retiros = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Compras"]]
     graf_retiros = _crear_grafico_barras_mer(
         titulo=f"Retiros de energía del MER {anio_int} (MWh)",
@@ -370,7 +357,6 @@ def generar_pdf_transacciones_anuales_mer(
     elementos.append(graf_retiros)
     elementos.append(Spacer(1, 0.12 * inch))
 
-    # 4. Gráfica 2: Inyecciones de energía al MER {AÑO} (MWh)
     vals_inyecciones = [float(v) if pd.notna(v) else 0.0 for v in df_anual["Total_Ventas"]]
     graf_inyecciones = _crear_grafico_barras_mer(
         titulo=f"Inyecciones de energía al MER {anio_int} (MWh)",
