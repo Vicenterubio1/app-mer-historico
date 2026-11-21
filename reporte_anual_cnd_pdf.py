@@ -271,19 +271,21 @@ def generar_pdf_transacciones_anuales_mer(
     )
 
     if os.path.exists(ruta_logo):
-        logo_elem = Image(ruta_logo, width=2.2 * cm, height=1.55 * cm)
+        logo_elem = Image(ruta_logo, width=6.2 * cm, height=1.55 * cm, kind="proportional")
     else:
-        logo_elem = Paragraph("", st_encabezado_inst)
+        logo_elem = Paragraph("CENTRO NACIONAL<br/>DE DESPACHO", st_encabezado_inst)
 
     encabezado_doc = Table(
-        [[logo_elem, Paragraph("CENTRO NACIONAL<br/>DE DESPACHO", st_encabezado_inst)]],
-        colWidths=[2.5 * cm, 15.7 * cm],
+        [[logo_elem]],
+        colWidths=[18.2 * cm],
     )
     encabezado_doc.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("LINEAFTER", (0, 0), (0, 0), 1.3, colors.black),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
 
     filas_tabla = [
@@ -403,7 +405,7 @@ def generar_pdf_transacciones_anuales_mer(
 
     elementos = [
         encabezado_doc,
-        Spacer(1, 0.28 * cm),
+        Spacer(1, 0.25 * cm),
         tabla,
         Spacer(1, 0.32 * cm),
         KeepTogether([img_retiros, Spacer(1, 0.22 * cm), img_inyecciones]),
