@@ -237,12 +237,12 @@ def generar_pdf_transacciones_anuales_mer(
     if not ruta_salida:
         ruta_salida = f"Transacciones_Energia_MER_{anio}_{etq_area}_hasta_{etq_mes}.pdf"
 
-    def _fmt_celda(val, guion_si_cero=True):
+    def _fmt_celda(val):
         if val is None or pd.isna(val):
             return ""
         v = float(val)
         if abs(v) < 0.0005:
-            return "-" if guion_si_cero else ""
+            return ""
         return f"{v:,.3f}"
 
     st_encabezado_inst = ParagraphStyle(
@@ -322,16 +322,16 @@ def generar_pdf_transacciones_anuales_mer(
     for _, r in df_anual.iterrows():
         m_num = int(r["mes_num"])
         if m_num > mes_limite:
-            filas_tabla.append([r["Fecha"], "", "", "", "", "-", "-"])
+            filas_tabla.append([r["Fecha"], "", "", "", "", "", ""])
         else:
             filas_tabla.append([
                 r["Fecha"],
-                _fmt_celda(r["Compras_Contratos"], guion_si_cero=True),
-                _fmt_celda(r["Compras_Oportunidad"], guion_si_cero=True),
-                _fmt_celda(r["Ventas_Contratos"], guion_si_cero=True),
-                _fmt_celda(r["Ventas_Oportunidad"], guion_si_cero=True),
-                _fmt_celda(r["Total_Compras"], guion_si_cero=True),
-                _fmt_celda(r["Total_Ventas"], guion_si_cero=True),
+                _fmt_celda(r["Compras_Contratos"]),
+                _fmt_celda(r["Compras_Oportunidad"]),
+                _fmt_celda(r["Ventas_Contratos"]),
+                _fmt_celda(r["Ventas_Oportunidad"]),
+                _fmt_celda(r["Total_Compras"]),
+                _fmt_celda(r["Total_Ventas"]),
             ])
 
     tot_cc = float(df_anual["Compras_Contratos"].dropna().sum())
@@ -343,12 +343,12 @@ def generar_pdf_transacciones_anuales_mer(
 
     filas_tabla.append([
         "Total",
-        _fmt_celda(tot_cc, guion_si_cero=True),
-        _fmt_celda(tot_co, guion_si_cero=True),
-        _fmt_celda(tot_vc, guion_si_cero=True),
-        _fmt_celda(tot_vo, guion_si_cero=True),
-        _fmt_celda(tot_tc, guion_si_cero=True),
-        _fmt_celda(tot_tv, guion_si_cero=True),
+        _fmt_celda(tot_cc),
+        _fmt_celda(tot_co),
+        _fmt_celda(tot_vc),
+        _fmt_celda(tot_vo),
+        _fmt_celda(tot_tc),
+        _fmt_celda(tot_tv),
     ])
 
     color_azul_cnd = colors.HexColor("#16365C")
