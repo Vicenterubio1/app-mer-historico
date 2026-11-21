@@ -31,7 +31,7 @@ MESES_CORTOS_ES = [
 
 CONDICION_FLEX_SQL = """
     UPPER(TRIM(COALESCE(tipo_contrato, ''))) = 'CNFFF'
-    AND REPLACE(LOWER(TRIM(COALESCE(tipo_oferta, ''))), '.', '') LIKE '%oi flexibilidad%'
+    AND REPLACE(LOWER(TRIM(COALESCE(tipo_oferta, ''))), '.', '') = 'oi flexibilidad'
     AND ABS(COALESCE(mw_predespachados, 0)) > 1e-9
 """
 
