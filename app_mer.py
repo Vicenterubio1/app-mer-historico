@@ -724,22 +724,29 @@ with tab_reportes:
                 )
                 tipo_tr_cnd = sentido_cnd.split(" - ")[0]
 
-            col_nom1, col_nom2, col_nom3 = st.columns(3)
-            nom_default_sumin = mapa_agentes.get(cp_sel) or cp_sel
-            nom_default_recep = mapa_agentes.get(ag_nac_sel) or ("ENEE" if "ENEE" in ag_nac_sel else ag_nac_sel)
+           col_nom1, col_nom2, col_nom3 = st.columns(3)
+            cp_clean = limpiar_codigo(cp_sel)
+            ag_nac_clean = limpiar_codigo(ag_nac_sel)
+
+            nom_default_sumin = mapa_agentes.get(cp_clean) or cp_clean
+            nom_default_recep = (
+                "ENEE"
+                if "ENEE" in ag_nac_clean
+                else (mapa_agentes.get(ag_nac_clean) or ag_nac_clean)
+            )
             nom_default_elab = usuario_actual.get("nombre", "")
 
             with col_nom1:
                 nombre_sumin_pdf = st.text_input(
                     "Nombre del Suministrador en el Título PDF:",
                     value=nom_default_sumin,
-                    key=f"txt_sumin_{cp_sel}",
+                    key=f"txt_sumin_{cp_clean}",
                 )
             with col_nom2:
                 nombre_recep_pdf = st.text_input(
                     "Nombre del Receptor en el Título PDF:",
                     value=nom_default_recep,
-                    key=f"txt_recep_{ag_nac_sel}",
+                    key=f"txt_recep_{ag_nac_clean}",
                 )
             with col_nom3:
                 elaborado_por_pdf = st.text_input(
