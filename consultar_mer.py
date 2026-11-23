@@ -349,7 +349,7 @@ def generar_pdf_reporte_cnd(
     ruta_salida: str = None,
     elaborado_por: str = "",
 ):
-    """Genera el reporte mensual oficial en PDF estilo CND con logo, tabla CF / CNFFF y pie de firma."""
+    """Genera el reporte mensual oficial en PDF estilo CND con logo, tabla CF / CNFFF y espacio para firma."""
     df_mes = construir_df_mensual_cnd(conn, anio, mes, agente_nacional, agente_contraparte, tipo_transaccion)
 
     if not ruta_salida:
@@ -428,10 +428,10 @@ def generar_pdf_reporte_cnd(
         ("VALIGN", (0, 0), (3, -1), "MIDDLE"),
 
         ("FONTNAME", (0, 3), (3, -2), "Helvetica"),
-        ("FONTSIZE", (0, 3), (3, -2), 9),
+        ("FONTSIZE", (0, 3), (3, -2), 8.8),
         ("ALIGN", (0, 3), (3, -2), "RIGHT"),
-        ("TOPPADDING", (0, 3), (3, -2), 2.1),
-        ("BOTTOMPADDING", (0, 3), (3, -2), 2.1),
+        ("TOPPADDING", (0, 3), (3, -2), 1.75),
+        ("BOTTOMPADDING", (0, 3), (3, -2), 1.75),
 
         ("FONTNAME", (0, -1), (3, -1), "Helvetica-Bold"),
         ("FONTSIZE", (0, -1), (3, -1), 9.5),
@@ -458,18 +458,19 @@ def generar_pdf_reporte_cnd(
             textColor=colors.black,
         )
         bloque_firma = Paragraph(
+            f"____________________________________<br/>"
             f"<b>Elaborado por:</b> {nombre_firma}<br/>"
             f"Departamento Liquidación de Transacciones de Mercado",
             st_firma,
         )
-        elementos.append(Spacer(1, 0.55 * cm))
+        elementos.append(Spacer(1, 2.0 * cm))
         elementos.append(bloque_firma)
 
     doc = SimpleDocTemplate(
         ruta_salida,
         pagesize=letter,
-        topMargin=1.0 * cm,
-        bottomMargin=1.0 * cm,
+        topMargin=0.9 * cm,
+        bottomMargin=0.9 * cm,
         leftMargin=2.2 * cm,
         rightMargin=2.2 * cm,
     )
