@@ -317,12 +317,20 @@ def cargar_mapa_etiquetas_nodos():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_diccionario_agentes_cache():
+    mapa = {
+        limpiar_codigo(cod): nom.strip()
+        for cod, (nom, _) in DIRECTORIO_AGENTES_MER.items()
+    }
     c = obtener_conexion()
     try:
         asegurar_esquema(c)
-        return obtener_diccionario_agentes(c)
+        mapa_bd = obtener_diccionario_agentes(c)
+        for cod, nom in mapa_bd.items():
+            if nom and nom.strip():
+                mapa[limpiar_codigo(cod)] = nom.strip()
+        return mapa
     except Exception:
-        return {}
+        return mapa
     finally:
         c.close()
 
