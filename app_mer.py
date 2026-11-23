@@ -189,6 +189,28 @@ def inicializar_y_sincronizar_catalogo(conn):
         )
         """,
     )
+    for cod_reg, (razon_social, actividad) in DIRECTORIO_AGENTES_MER.items():
+        cod_clean = limpiar_codigo(cod_reg)
+        if cod_clean:
+            pais_reg = PREFIJO_PAIS.get(cod_clean[0], "OTRO")
+            ejecutar_sql(
+                cur,
+                """
+                INSERT INTO dim_catalogo_agentes (codigo_agente, pais, nombre_agente, tipo_agente)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (codigo_agente) DO UPDATE SET
+                    pais = COALESCE(NULLIF(dim_catalogo_agentes.pais, ''), excluded.pais),
+                    nombre_agente = CASE
+                        WHEN COALESCE(TRIM(dim_catalogo_agentes.nombre_agente), '') = '' THEN excluded.nombre_agente
+                        ELSE dim_catalogo_agentes.nombre_agente
+                    END,
+                    tipo_agente = CASE
+                        WHEN COALESCE(TRIM(dim_catalogo_agentes.tipo_agente), '') = '' THEN excluded.tipo_agente
+                        ELSE dim_catalogo_agentes.tipo_agente
+                    END
+                """,
+                (cod_clean, pais_reg, razon_social.strip(), actividad.strip()),
+            )
     conn.commit()
 
     nodos_bd = ejecutar_consulta_df(
