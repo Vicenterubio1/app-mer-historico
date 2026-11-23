@@ -7,7 +7,7 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import (
     SimpleDocTemplate,
     Table,
@@ -17,7 +17,7 @@ from reportlab.platypus import (
     Image,
 )
 
-from db_mer import ejecutar_consulta_df
+from db_mer import ejecutar_consulta_df, ejecutar_sql, es_postgres, ESQUEMA_PG
 from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
 
 DIAS_SEMANA_ES = [
@@ -65,6 +65,37 @@ def formatear_fecha_larga_es(fecha_str):
     return f"{dia_sem}, {dt.day} de {mes_nom} de {dt.year}"
 
 
+def _asegurar_columnas_diario(conn):
+    """Garantiza que existan las columnas de puntos de medida en TCP y TOP."""
+    cur = conn.cursor()
+    try:
+        if es_postgres(conn):
+            cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
+            ejecutar_sql(cur, "ALTER TABLE fact_contratos_tcp ADD COLUMN IF NOT EXISTS punto_medida TEXT DEFAULT '';")
+            ejecutar_sql(cur, "ALTER TABLE fact_contratos_tcp ADD COLUMN IF NOT EXISTS punto_medida_contraparte TEXT DEFAULT '';")
+            ejecutar_sql(cur, "ALTER TABLE fact_oportunidad_top ADD COLUMN IF NOT EXISTS punto_medida TEXT DEFAULT '';")
+        else:
+            cur.execute("PRAGMA table_info(fact_contratos_tcp);")
+            cols_tcp = [r[1].lower() for r in cur.fetchall()]
+            if "punto_medida" not in cols_tcp:
+                ejecutar_sql(cur, "ALTER TABLE fact_contratos_tcp ADD COLUMN punto_medida TEXT DEFAULT '';")
+            if "punto_medida_contraparte" not in cols_tcp:
+                ejecutar_sql(cur, "ALTER TABLE fact_contratos_tcp ADD COLUMN punto_medida_contraparte TEXT DEFAULT '';")
+
+            cur.execute("PRAGMA table_info(fact_oportunidad_top);")
+            cols_top = [r[1].lower() for r in cur.fetchall()]
+            if "punto_medida" not in cols_top:
+                ejecutar_sql(cur, "ALTER TABLE fact_oportunidad_top ADD COLUMN punto_medida TEXT DEFAULT '';")
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        cur.close()
+
+
 def _obtener_mapa_agentes(conn):
     mapa = {
         _limpiar_str(cod): _limpiar_str(nom)
@@ -90,52 +121,86 @@ def construir_datos_diarios_agente(conn, fecha_operacion, codigo_agente):
     Construye la estructura horaria (00:00 a 23:00) y metadatos de columnas
     para el Informe Diario de Transacciones Regionales de un agente nacional.
     """
+    _asegurar_columnas_diario(conn)
+
     ag_clean = _limpiar_str(codigo_agente)
     fecha_clean = str(fecha_operacion)[:10]
     mapa_ag = _obtener_mapa_agentes(conn)
 
-    # 1. Consultar Contratos TCP del agente en esa fecha
-    # Excluir O.I. Flexibilidad (CNFFF) si el agente es ENEE (se clasifica en Oportunidad)
-    df_tcp = ejecutar_consulta_df(
-        """
-        SELECT strftime('%H', fecha_hora) AS hora,
-               TRIM(COALESCE(agente_contraparte, '')) AS contraparte,
-               TRIM(COALESCE(punto_medida_contraparte, '')) AS pm_cp,
-               TRIM(COALESCE(punto_medida, '')) AS pm_nac,
-               LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
-               UPPER(TRIM(COALESCE(tipo_contrato, ''))) AS tipo_contrato,
-               LOWER(TRIM(COALESCE(tipo_oferta, ''))) AS tipo_oferta,
-               COALESCE(mw_predespachados, 0.0) AS mwh
-        FROM fact_contratos_tcp
-        WHERE fecha_operacion = ?
-          AND TRIM(codigo_agente) = ?
-          AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
-        """,
-        conn,
-        params=[fecha_clean, ag_clean],
-    )
+    try:
+        df_tcp = ejecutar_consulta_df(
+            """
+            SELECT strftime('%H', fecha_hora) AS hora,
+                   TRIM(COALESCE(agente_contraparte, '')) AS contraparte,
+                   TRIM(COALESCE(punto_medida_contraparte, '')) AS pm_cp,
+                   TRIM(COALESCE(punto_medida, '')) AS pm_nac,
+                   LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
+                   UPPER(TRIM(COALESCE(tipo_contrato, ''))) AS tipo_contrato,
+                   LOWER(TRIM(COALESCE(tipo_oferta, ''))) AS tipo_oferta,
+                   COALESCE(mw_predespachados, 0.0) AS mwh
+            FROM fact_contratos_tcp
+            WHERE fecha_operacion = ?
+              AND TRIM(codigo_agente) = ?
+              AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
+            """,
+            conn,
+            params=[fecha_clean, ag_clean],
+        )
+    except Exception:
+        df_tcp = ejecutar_consulta_df(
+            """
+            SELECT strftime('%H', fecha_hora) AS hora,
+                   TRIM(COALESCE(agente_contraparte, '')) AS contraparte,
+                   '' AS pm_cp,
+                   '' AS pm_nac,
+                   LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
+                   UPPER(TRIM(COALESCE(tipo_contrato, ''))) AS tipo_contrato,
+                   LOWER(TRIM(COALESCE(tipo_oferta, ''))) AS tipo_oferta,
+                   COALESCE(mw_predespachados, 0.0) AS mwh
+            FROM fact_contratos_tcp
+            WHERE fecha_operacion = ?
+              AND TRIM(codigo_agente) = ?
+              AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
+            """,
+            conn,
+            params=[fecha_clean, ag_clean],
+        )
 
-    # 2. Consultar Oportunidad TOP del agente en esa fecha
-    df_top = ejecutar_consulta_df(
-        """
-        SELECT strftime('%H', fecha_hora) AS hora,
-               TRIM(COALESCE(punto_medida, '')) AS pm_nac,
-               LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
-               COALESCE(precio_exante, 0.0) AS precio,
-               COALESCE(mw_predespachados, 0.0) AS mwh
-        FROM fact_oportunidad_top
-        WHERE fecha_operacion = ?
-          AND TRIM(codigo_agente) = ?
-          AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
-        """,
-        conn,
-        params=[fecha_clean, ag_clean],
-    )
+    try:
+        df_top = ejecutar_consulta_df(
+            """
+            SELECT strftime('%H', fecha_hora) AS hora,
+                   TRIM(COALESCE(punto_medida, '')) AS pm_nac,
+                   LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
+                   COALESCE(precio_exante, 0.0) AS precio,
+                   COALESCE(mw_predespachados, 0.0) AS mwh
+            FROM fact_oportunidad_top
+            WHERE fecha_operacion = ?
+              AND TRIM(codigo_agente) = ?
+              AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
+            """,
+            conn,
+            params=[fecha_clean, ag_clean],
+        )
+    except Exception:
+        df_top = ejecutar_consulta_df(
+            """
+            SELECT strftime('%H', fecha_hora) AS hora,
+                   '' AS pm_nac,
+                   LOWER(TRIM(COALESCE(tipo_transaccion, ''))) AS tipo,
+                   COALESCE(precio_exante, 0.0) AS precio,
+                   COALESCE(mw_predespachados, 0.0) AS mwh
+            FROM fact_oportunidad_top
+            WHERE fecha_operacion = ?
+              AND TRIM(codigo_agente) = ?
+              AND ABS(COALESCE(mw_predespachados, 0.0)) > 1e-9
+            """,
+            conn,
+            params=[fecha_clean, ag_clean],
+        )
 
     horas = [f"{h:02d}" for h in range(24)]
 
-    # Separar contratos de Compra ('r') y de Venta ('i')
-    # Nota: para ENEE, O.I. Flexibilidad en CNFFF va a Ventas Oportunidad
     es_enee = "ENEE" in ag_clean.upper()
     df_flex = pd.DataFrame()
     if not df_tcp.empty and es_enee:
@@ -147,7 +212,7 @@ def construir_datos_diarios_agente(conn, fecha_operacion, codigo_agente):
         df_flex = df_tcp[mask_flex].copy()
         df_tcp = df_tcp[~mask_flex].copy()
 
-    compras_cols = []  # lista de dicts: {cp, nombre_cp, pm_cp, pm_nac, valores: {hora: mwh}}
+    compras_cols = []
     ventas_cols = []
 
     if not df_tcp.empty:
@@ -186,7 +251,6 @@ def construir_datos_diarios_agente(conn, fecha_operacion, codigo_agente):
                     "valores": {h: float(grp.get(h, 0.0)) for h in horas},
                 })
 
-    # Procesar Oportunidad (Compras 'r' y Ventas 'i')
     op_compra_pm = ""
     op_venta_pm = ""
     op_compra_mwh = {h: 0.0 for h in horas}
@@ -217,12 +281,10 @@ def construir_datos_diarios_agente(conn, fecha_operacion, codigo_agente):
                     else:
                         dict_usd[h] = float(grp["precio"].mean())
 
-    # Sumar flexibilidad de ENEE si existiera
     if not df_flex.empty:
         for h, grp in df_flex.groupby("hora"):
             op_venta_mwh[h] += float(grp["mwh"].abs().sum())
 
-    # Construir DataFrame plano de vista previa web y reporte
     filas_df = []
     for h in horas:
         fila = {"Hora": f"{h}:00"}
@@ -319,8 +381,6 @@ def generar_pdf_diario_agente_cnd(
     n_comp = len(compras_cols)
     n_vent = len(ventas_cols)
 
-    # Total de columnas de la tabla:
-    # 1 (HORA) + n_comp + (1 si n_comp>0) + n_vent + (1 si n_vent>0) + 4 (Oportunidad)
     total_cols = 1 + (n_comp + 1 if n_comp > 0 else 0) + (n_vent + 1 if n_vent > 0 else 0) + 4
     usar_landscape = total_cols > 7
     pagesize = landscape(letter) if usar_landscape else letter
@@ -380,7 +440,6 @@ def generar_pdf_diario_agente_cnd(
 
     elementos = []
 
-    # Encabezado institucional con logo CND a la izquierda y títulos centrados
     logo_obj = _crear_logo_cnd_ajustado(ruta_logo, alto_objetivo=15 * mm, max_ancho=68 * mm)
     col_logo_w = 72 * mm
     col_tit_w = ancho_util - col_logo_w
@@ -408,12 +467,7 @@ def generar_pdf_diario_agente_cnd(
     elementos.append(tbl_encabezado)
     elementos.append(Spacer(1, 3 * mm))
 
-    # ==========================================
-    # CONSTRUCCIÓN DE ENCABEZADO MULTINIVEL (6 FILAS)
-    # ==========================================
-    # Si no tiene ni compras ni ventas en TCP, mostramos al menos un bloque vacío de Compra
     mostrar_bloque_compra = n_comp > 0 or (n_comp == 0 and n_vent == 0)
-    cols_bloque_compra = max(n_comp, 1) if mostrar_bloque_compra else 0
     cols_bloque_venta = n_vent
 
     fila0 = [Paragraph("HORA", st_hdr)]
@@ -424,12 +478,11 @@ def generar_pdf_diario_agente_cnd(
     fila5 = [""]
 
     spans = [
-        ("SPAN", (0, 0), (0, 5)),  # HORA abarca las 6 filas de encabezado
+        ("SPAN", (0, 0), (0, 5)),
     ]
 
     col_idx = 1
 
-    # Bloque Contratos Compra
     if mostrar_bloque_compra:
         if n_comp > 0:
             for c_info in compras_cols:
@@ -451,7 +504,6 @@ def generar_pdf_diario_agente_cnd(
             spans.append(("SPAN", (col_idx, 4), (col_idx, 5)))
             col_idx += 1
 
-        # Columna Total Compra de Energía (MWh)
         fila0.append(Paragraph("Total Compra de Energía (MWh)", st_hdr))
         fila1.append("")
         fila2.append("")
@@ -461,7 +513,6 @@ def generar_pdf_diario_agente_cnd(
         spans.append(("SPAN", (col_idx, 0), (col_idx, 5)))
         col_idx += 1
 
-    # Bloque Contratos Venta (si existen)
     if cols_bloque_venta > 0:
         for v_info in ventas_cols:
             fila0.append(Paragraph(v_info["nombre_cp"], st_hdr))
@@ -482,7 +533,6 @@ def generar_pdf_diario_agente_cnd(
         spans.append(("SPAN", (col_idx, 0), (col_idx, 5)))
         col_idx += 1
 
-    # Bloque COMPRAS OPORTUNIDAD (2 columnas: MWh, US$/MWh)
     c_op_comp_ini = col_idx
     fila0.extend([Paragraph("COMPRAS OPORTUNIDAD", st_hdr), ""])
     fila1.extend(["", ""])
@@ -495,7 +545,6 @@ def generar_pdf_diario_agente_cnd(
     spans.append(("SPAN", (c_op_comp_ini, 4), (c_op_comp_ini + 1, 4)))
     col_idx += 2
 
-    # Bloque VENTAS OPORTUNIDAD (2 columnas: MWh, US$/MWh)
     c_op_vent_ini = col_idx
     fila0.extend([Paragraph("VENTAS OPORTUNIDAD", st_hdr), ""])
     fila1.extend(["", ""])
@@ -510,7 +559,6 @@ def generar_pdf_diario_agente_cnd(
 
     data_tabla = [fila0, fila1, fila2, fila3, fila4, fila5]
 
-    # Filas horarias (00:00 a 23:00)
     totales_comp_cols = [0.0] * max(n_comp, 1)
     totales_vent_cols = [0.0] * n_vent
     tot_op_comp_mwh = 0.0
@@ -559,7 +607,6 @@ def generar_pdf_diario_agente_cnd(
         ])
         data_tabla.append(fila_h)
 
-    # Fila TOTAL al pie de la tabla
     fila_tot = ["TOTAL"]
     if mostrar_bloque_compra:
         if n_comp > 0:
@@ -584,7 +631,6 @@ def generar_pdf_diario_agente_cnd(
     ])
     data_tabla.append(fila_tot)
 
-    # Anchos proporcionales
     num_columnas = len(fila0)
     w_hora = 15 * mm
     w_resto = (ancho_util - w_hora) / max(num_columnas - 1, 1)
@@ -619,7 +665,6 @@ def generar_pdf_diario_agente_cnd(
     elementos.append(tabla)
     elementos.append(Spacer(1, 10 * mm))
 
-    # Bloque centrado para firma al pie del reporte
     nombre_firma = _limpiar_str(elaborado_por) or "____________________________________"
     lineas_firma = [
         [Paragraph("________________________________________", st_firma)],
