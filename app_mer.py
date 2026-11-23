@@ -28,6 +28,7 @@ from consultar_mer import (
 )
 from reporte_compra_venta_pdf import generar_pdf_informe_compra_venta
 from reporte_anual_cnd_pdf import (
+from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
     construir_df_anual_mer,
     generar_pdf_transacciones_anuales_mer,
 )
