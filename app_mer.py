@@ -31,6 +31,10 @@ from reporte_anual_cnd_pdf import (
     construir_df_anual_mer,
     generar_pdf_transacciones_anuales_mer,
 )
+from reporte_diario_agente_pdf import (
+    construir_datos_diarios_agente,
+    generar_pdf_diario_agente_cnd,
+)
 from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
 
 st.set_page_config(page_title="Gestión Histórica MER", page_icon="⚡", layout="wide")
@@ -200,7 +204,6 @@ def inicializar_y_sincronizar_catalogo(conn):
     )
     conn.commit()
 
-    # Limpiar posibles cadenas literales 'nan'/'none'/'null' guardadas previamente
     ejecutar_sql(
         cur,
         """
@@ -497,6 +500,37 @@ def cargar_pares_tcp():
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def cargar_agentes_nacionales_activos():
+    c = obtener_conexion()
+    try:
+        asegurar_esquema(c)
+        df = ejecutar_consulta_df(
+            """
+            SELECT DISTINCT TRIM(codigo_agente) AS agente_nac FROM fact_contratos_tcp WHERE TRIM(codigo_agente) != ''
+            UNION
+            SELECT DISTINCT TRIM(codigo_agente) AS agente_nac FROM fact_oportunidad_top WHERE TRIM(codigo_agente) != ''
+            ORDER BY agente_nac
+            """,
+            c,
+        )
+        return df["agente_nac"].tolist() if not df.empty else []
+    except Exception:
+        return []
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_datos_diarios_agente_cache(fecha_op, ag_cod):
+    c = obtener_conexion()
+    try:
+        asegurar_esquema(c)
+        return construir_datos_diarios_agente(c, fecha_op, ag_cod)
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def cargar_df_mensual_cnd_cache(anio_cnd, mes_num_cnd, ag_nac_sel, cp_sel, tipo_tr_cnd):
     c = obtener_conexion()
     try:
@@ -709,6 +743,117 @@ with tab_reportes:
 
         st.divider()
 
+        mapa_agentes = cargar_diccionario_agentes_cache()
+
+        def fmt_ag(cod):
+            nom = limpiar_texto_catalogo(mapa_agentes.get(limpiar_codigo(cod), ""))
+            return f"{cod} - {nom}" if nom else cod
+
+        # ==========================================
+        # SECCIÓN: INFORME DIARIO DE TRANSACCIONES REGIONALES POR AGENTE (PDF CND)
+        # ==========================================
+        st.subheader("📑 Informe Diario de Transacciones Regionales por Agente (PDF CND)")
+        st.caption(
+            "Genera el cuadro diario horario (00:00 a 23:00) por agente nacional desglosando cada contrato por contraparte y punto de medida, más compras y ventas de oportunidad."
+        )
+
+        agentes_activos_diario = cargar_agentes_nacionales_activos()
+        if not agentes_activos_diario:
+            st.info("Aún no hay agentes nacionales registrados para generar el informe diario.")
+        else:
+            col_d1, col_d2, col_d3, col_d4 = st.columns([1.0, 1.7, 1.1, 1.2])
+            with col_d1:
+                fecha_diario_sel = st.selectbox(
+                    "Fecha Operativa:",
+                    options=fechas_disp,
+                    index=0,
+                    key="diario_ag_fecha",
+                    on_change=limpiar_descarga,
+                    args=("pdf_diario_ag_bytes", "pdf_diario_ag_nombre"),
+                )
+            with col_d2:
+                idx_denee = agentes_activos_diario.index("3DENEE") if "3DENEE" in agentes_activos_diario else 0
+                ag_diario_sel = st.selectbox(
+                    "Agente Nacional:",
+                    options=agentes_activos_diario,
+                    index=idx_denee,
+                    format_func=fmt_ag,
+                    key="diario_ag_cod",
+                    on_change=limpiar_descarga,
+                    args=("pdf_diario_ag_bytes", "pdf_diario_ag_nombre"),
+                )
+            with col_d3:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("📄 Generar PDF Diario Agente", type="primary", use_container_width=True, key="btn_pdf_diario_ag"):
+                    c_d_pdf = obtener_conexion()
+                    try:
+                        asegurar_esquema(c_d_pdf)
+                        ruta_pdf_d = generar_pdf_diario_agente_cnd(
+                            conn=c_d_pdf,
+                            fecha_operacion=fecha_diario_sel,
+                            codigo_agente=ag_diario_sel,
+                            ruta_logo="logo_cnd.png",
+                            elaborado_por=usuario_actual.get("nombre", ""),
+                        )
+                    finally:
+                        c_d_pdf.close()
+
+                    if os.path.exists(ruta_pdf_d):
+                        with open(ruta_pdf_d, "rb") as f_d:
+                            st.session_state["pdf_diario_ag_bytes"] = f_d.read()
+                            st.session_state["pdf_diario_ag_nombre"] = os.path.basename(ruta_pdf_d)
+
+            with col_d4:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if "pdf_diario_ag_bytes" in st.session_state:
+                    st.download_button(
+                        label=f"⬇️ Descargar {st.session_state['pdf_diario_ag_nombre']}",
+                        data=st.session_state["pdf_diario_ag_bytes"],
+                        file_name=st.session_state["pdf_diario_ag_nombre"],
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key="dl_pdf_diario_ag",
+                        on_click=limpiar_descarga,
+                        args=("pdf_diario_ag_bytes", "pdf_diario_ag_nombre"),
+                    )
+
+            datos_diario_prev = cargar_datos_diarios_agente_cache(fecha_diario_sel, ag_diario_sel)
+            df_d_prev = datos_diario_prev["df_resumen"].copy()
+            if not df_d_prev.empty:
+                fila_tot_d = {"Hora": "TOTAL"}
+                for col_d in df_d_prev.columns:
+                    if col_d == "Hora":
+                        continue
+                    if "(US$/MWh)" in col_d:
+                        col_mwh_ref = col_d.replace("(US$/MWh)", "(MWh)")
+                        tot_m = df_d_prev[col_mwh_ref].sum() if col_mwh_ref in df_d_prev.columns else 0.0
+                        fila_tot_d[col_d] = (
+                            float((df_d_prev[col_d] * df_d_prev[col_mwh_ref]).sum() / tot_m)
+                            if tot_m > 1e-9
+                            else 0.0
+                        )
+                    else:
+                        fila_tot_d[col_d] = float(df_d_prev[col_d].sum())
+                df_d_prev = pd.concat([df_d_prev, pd.DataFrame([fila_tot_d])], ignore_index=True)
+
+                fmt_d_cols = {}
+                for col_d in df_d_prev.columns:
+                    if col_d == "Hora":
+                        continue
+                    if "Op." in col_d:
+                        fmt_d_cols[col_d] = "{:,.2f}"
+                    else:
+                        fmt_d_cols[col_d] = "{:,.3f}"
+
+                st.dataframe(
+                    df_d_prev.style.format(fmt_d_cols),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=310,
+                )
+
+        st.divider()
+
         # ==========================================
         # SECCIÓN: REPORTE MENSUAL OFICIAL CND (PDF CON LOGO)
         # ==========================================
@@ -720,7 +865,6 @@ with tab_reportes:
         if pares_tcp.empty:
             st.info("Aún no hay registros con Agente Contraparte en `fact_contratos_tcp` para generar el reporte mensual CND.")
         else:
-            mapa_agentes = cargar_diccionario_agentes_cache()
             meses_disponibles = sorted(list({str(f)[:7] for f in fechas_disp}), reverse=True)
 
             col_cnd1, col_cnd2, col_cnd3, col_cnd4 = st.columns([1.1, 1.4, 1.4, 1.1])
@@ -731,11 +875,6 @@ with tab_reportes:
 
             with col_cnd2:
                 lista_ag_nac = sorted(pares_tcp["agente_nac"].unique().tolist())
-
-                def fmt_ag(cod):
-                    nom = limpiar_texto_catalogo(mapa_agentes.get(limpiar_codigo(cod), ""))
-                    return f"{cod} - {nom}" if nom else cod
-
                 ag_nac_sel = st.selectbox(
                     "Agente Nacional (Receptor):",
                     options=lista_ag_nac,
