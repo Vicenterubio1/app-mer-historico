@@ -349,7 +349,7 @@ def generar_pdf_reporte_cnd(
     ruta_salida: str = None,
     elaborado_por: str = "",
 ):
-    """Genera el reporte mensual oficial en PDF estilo CND con logo, tabla CF / CNFFF y espacio para firma."""
+    """Genera el reporte mensual oficial en PDF estilo CND con logo, tabla CF / CNFFF y espacio centrado para firma."""
     df_mes = construir_df_mensual_cnd(conn, anio, mes, agente_nacional, agente_contraparte, tipo_transaccion)
 
     if not ruta_salida:
@@ -454,7 +454,7 @@ def generar_pdf_reporte_cnd(
             fontName="Helvetica",
             fontSize=9.0,
             leading=12.5,
-            alignment=TA_LEFT,
+            alignment=TA_CENTER,
             textColor=colors.black,
         )
         bloque_firma = Paragraph(
