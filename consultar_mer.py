@@ -6,9 +6,9 @@ import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 from db_mer import obtener_conexion, ejecutar_consulta_df
 
@@ -347,8 +347,9 @@ def generar_pdf_reporte_cnd(
     tipo_transaccion: str = "r",
     ruta_logo: str = "logo_cnd.png",
     ruta_salida: str = None,
+    elaborado_por: str = "",
 ):
-    """Genera el reporte mensual oficial en PDF estilo CND con logo y tabla CF / CNFFF."""
+    """Genera el reporte mensual oficial en PDF estilo CND con logo, tabla CF / CNFFF y pie de firma."""
     df_mes = construir_df_mensual_cnd(conn, anio, mes, agente_nacional, agente_contraparte, tipo_transaccion)
 
     if not ruta_salida:
@@ -444,15 +445,35 @@ def generar_pdf_reporte_cnd(
         ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.black),
     ]))
 
+    elementos = [tabla]
+
+    nombre_firma = str(elaborado_por or "").strip()
+    if nombre_firma:
+        st_firma = ParagraphStyle(
+            "FirmaCND",
+            fontName="Helvetica",
+            fontSize=9.0,
+            leading=12.5,
+            alignment=TA_LEFT,
+            textColor=colors.black,
+        )
+        bloque_firma = Paragraph(
+            f"<b>Elaborado por:</b> {nombre_firma}<br/>"
+            f"Departamento Liquidación de Transacciones de Mercado",
+            st_firma,
+        )
+        elementos.append(Spacer(1, 0.55 * cm))
+        elementos.append(bloque_firma)
+
     doc = SimpleDocTemplate(
         ruta_salida,
         pagesize=letter,
-        topMargin=1.1 * cm,
-        bottomMargin=1.1 * cm,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
         leftMargin=2.2 * cm,
         rightMargin=2.2 * cm,
     )
-    doc.build([tabla])
+    doc.build(elementos)
     return ruta_salida
 
 
