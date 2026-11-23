@@ -32,7 +32,6 @@ from reporte_anual_cnd_pdf import (
     generar_pdf_transacciones_anuales_mer,
 )
 from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
-)
 
 st.set_page_config(page_title="Gestión Histórica MER", page_icon="⚡", layout="wide")
 
