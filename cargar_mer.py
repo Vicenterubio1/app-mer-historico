@@ -56,18 +56,21 @@ def calcular_hash_bytes(data_bytes):
     return hashlib.sha256(data_bytes).hexdigest()
 
 
-def asegurar_columna_tipo_oferta(conn):
-    """Agrega la columna tipo_oferta a fact_contratos_tcp si aún no existe (SQLite y PostgreSQL)."""
+def asegurar_columnas_extra(conn):
+    """Agrega tipo_oferta y punto_medida_contraparte a fact_contratos_tcp si aún no existen."""
     cur = conn.cursor()
     try:
         if es_postgres(conn):
             cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
             cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN IF NOT EXISTS tipo_oferta TEXT DEFAULT '';")
+            cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN IF NOT EXISTS punto_medida_contraparte TEXT DEFAULT '';")
         else:
             cur.execute("PRAGMA table_info(fact_contratos_tcp);")
             cols = [r[1].lower() for r in cur.fetchall()]
             if "tipo_oferta" not in cols:
                 cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN tipo_oferta TEXT DEFAULT '';")
+            if "punto_medida_contraparte" not in cols:
+                cur.execute("ALTER TABLE fact_contratos_tcp ADD COLUMN punto_medida_contraparte TEXT DEFAULT '';")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -77,7 +80,7 @@ def asegurar_columna_tipo_oferta(conn):
 
 def inicializar_bd(conn):
     inicializar_esquema_completo(conn)
-    asegurar_columna_tipo_oferta(conn)
+    asegurar_columnas_extra(conn)
     cur = conn.cursor()
     if es_postgres(conn):
         cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
@@ -240,7 +243,11 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
     c_ag = next((c for c in df.columns if "agente" in c.lower() and "contra" not in c.lower()), None)
     c_pm = next((c for c in df.columns if "punto" in c.lower() and "contra" not in c.lower()), None)
     c_cont = buscar_col(["código contrato", "codigo contrato", "contrato"])
-    c_cp = buscar_col(["contraparte"])
+    c_cp = next((c for c in df.columns if "agente" in c.lower() and "contra" in c.lower()), None)
+    if not c_cp:
+        c_cp = next((c for c in df.columns if "contraparte" in c.lower() and "punto" not in c.lower()), None)
+    c_pm_cp = next((c for c in df.columns if "punto" in c.lower() and "contra" in c.lower()), None)
+
     c_tipo_tr = buscar_col(["tipo transa", "transacción", "transaccion"])
     c_tipo_ct = buscar_col(["tipo contrato"])
     c_tipo_of = buscar_col(["tipo oferta", "oferta"])
@@ -266,17 +273,27 @@ def parsear_hoja_tcp(xl, fecha_op, pais):
         val_of = row[c_tipo_of] if c_tipo_of else ""
         tipo_of_txt = "" if pd.isna(val_of) else str(val_of).strip()
 
+        val_pm = row[c_pm] if c_pm else ""
+        pm_txt = "" if pd.isna(val_pm) else str(val_pm).strip()
+
+        val_pm_cp = row[c_pm_cp] if c_pm_cp else ""
+        pm_cp_txt = "" if pd.isna(val_pm_cp) else str(val_pm_cp).strip()
+
+        val_cp = row[c_cp] if c_cp else ""
+        cp_txt = "" if pd.isna(val_cp) else str(val_cp).strip()
+
         registros.append({
             "fecha_operacion": fecha_op,
             "fecha_hora": f"{fecha_op} {h_str}:00:00",
             "pais": pais,
             "codigo_nodo": limpiar_codigo(row[c_nodo]) if c_nodo else "",
             "codigo_agente": ag,
-            "punto_medida": str(row[c_pm] or "").strip() if c_pm else "",
+            "punto_medida": pm_txt,
             "codigo_contrato": str(row[c_cont] or "").strip() if c_cont else "",
             "tipo_contrato": str(row[c_tipo_ct] or "").strip() if c_tipo_ct else "",
             "tipo_oferta": tipo_of_txt,
-            "agente_contraparte": str(row[c_cp] or "").strip() if c_cp else "",
+            "agente_contraparte": cp_txt,
+            "punto_medida_contraparte": pm_cp_txt,
             "tipo_transaccion": tipo_tr,
             "mw_requerida": float(pd.to_numeric(row[c_req], errors="coerce") or 0.0) if c_req else 0.0,
             "mw_declarada": float(pd.to_numeric(row[c_dec], errors="coerce") or 0.0) if c_dec else 0.0,
@@ -328,13 +345,16 @@ def parsear_hoja_top(xl, fecha_op, pais):
         if not h_str or not ag or tipo_tr not in ("i", "r"):
             continue
 
+        val_pm = row[c_pm] if c_pm else ""
+        pm_txt = "" if pd.isna(val_pm) else str(val_pm).strip()
+
         registros.append({
             "fecha_operacion": fecha_op,
             "fecha_hora": f"{fecha_op} {h_str}:00:00",
             "pais": pais,
             "codigo_nodo": limpiar_codigo(row[c_nodo]) if c_nodo else "",
             "codigo_agente": ag,
-            "punto_medida": str(row[c_pm] or "").strip() if c_pm else "",
+            "punto_medida": pm_txt,
             "tipo_transaccion": tipo_tr,
             "mw_requerida": float(pd.to_numeric(row[c_req], errors="coerce") or 0.0) if c_req else 0.0,
             "mw_declarada": float(pd.to_numeric(row[c_dec], errors="coerce") or 0.0) if c_dec else 0.0,
@@ -427,22 +447,27 @@ def procesar_excel_en_memoria(conn, nombre_excel, contenido_bytes, ts_publicacio
                 cur,
                 """
                 SELECT COUNT(*) FROM fact_contratos_tcp
-                WHERE fecha_operacion = ? AND pais = ? AND COALESCE(TRIM(tipo_oferta), '') != ''
+                WHERE fecha_operacion = ? AND pais = ?
+                  AND COALESCE(TRIM(tipo_oferta), '') != ''
+                  AND COALESCE(TRIM(punto_medida_contraparte), '') != ''
                 """,
                 (fecha_op, pais),
             )
-            tiene_of = (cur.fetchone()[0] or 0) > 0
-            if tiene_of:
+            tiene_cols = (cur.fetchone()[0] or 0) > 0
+            if tiene_cols:
                 print(f"[SKIP] {nombre_excel} (idéntico al ya cargado)")
                 cur.close()
                 return
             xl = pd.ExcelFile(io.BytesIO(contenido_bytes))
             df_tcp_pre = parsear_hoja_tcp(xl, fecha_op, pais)
-            if df_tcp_pre.empty or (df_tcp_pre["tipo_oferta"].str.strip() == "").all():
+            if df_tcp_pre.empty or (
+                (df_tcp_pre["tipo_oferta"].str.strip() == "").all()
+                and (df_tcp_pre["punto_medida_contraparte"].str.strip() == "").all()
+            ):
                 print(f"[SKIP] {nombre_excel} (idéntico al ya cargado)")
                 cur.close()
                 return
-            print(f"[UPDATE - Columna Tipo Oferta] Completando Tipo Oferta en {fecha_op} {pais} ({osom})...")
+            print(f"[UPDATE - Puntos Medida / Tipo Oferta] Completando columnas en {fecha_op} {pais} ({osom})...")
         elif ts_prev and ts_publicacion_eor and ts_publicacion_eor < ts_prev:
             print(f"[SKIP - Versión antigua] {nombre_excel} ({ts_publicacion_eor}) es anterior a {arch_prev} ({ts_prev})")
             cur.close()
