@@ -693,9 +693,10 @@ with tab_reportes:
                 )
                 tipo_tr_cnd = sentido_cnd.split(" - ")[0]
 
-            col_nom1, col_nom2 = st.columns(2)
+            col_nom1, col_nom2, col_nom3 = st.columns(3)
             nom_default_sumin = mapa_agentes.get(cp_sel) or cp_sel
             nom_default_recep = mapa_agentes.get(ag_nac_sel) or ("ENEE" if "ENEE" in ag_nac_sel else ag_nac_sel)
+            nom_default_elab = usuario_actual.get("nombre", "")
 
             with col_nom1:
                 nombre_sumin_pdf = st.text_input(
@@ -708,6 +709,12 @@ with tab_reportes:
                     "Nombre del Receptor en el Título PDF:",
                     value=nom_default_recep,
                     key=f"txt_recep_{ag_nac_sel}",
+                )
+            with col_nom3:
+                elaborado_por_pdf = st.text_input(
+                    "Elaborado por:",
+                    value=nom_default_elab,
+                    key="txt_elaborado_por_cnd",
                 )
 
             df_preview_cnd = cargar_df_mensual_cnd_cache(
@@ -760,6 +767,7 @@ with tab_reportes:
                             nombre_receptor=nombre_recep_pdf,
                             tipo_transaccion=tipo_tr_cnd,
                             ruta_logo="logo_cnd.png",
+                            elaborado_por=elaborado_por_pdf,
                         )
                     finally:
                         c_pdf.close()
