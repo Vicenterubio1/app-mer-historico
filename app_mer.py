@@ -45,6 +45,15 @@ def limpiar_codigo(val):
     return s
 
 
+def limpiar_texto_catalogo(val):
+    if val is None or pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "null", "<na>"):
+        return ""
+    return s
+
+
 def asegurar_esquema(conn):
     """Garantiza que PostgreSQL apunte al esquema configurado (mer) en cada conexión."""
     if es_postgres(conn):
@@ -191,6 +200,32 @@ def inicializar_y_sincronizar_catalogo(conn):
     )
     conn.commit()
 
+    # Limpiar posibles cadenas literales 'nan'/'none'/'null' guardadas previamente
+    ejecutar_sql(
+        cur,
+        """
+        UPDATE dim_catalogo_agentes
+        SET nombre_agente = ''
+        WHERE LOWER(TRIM(COALESCE(nombre_agente, ''))) IN ('nan', 'none', 'null', '<na>')
+        """,
+    )
+    ejecutar_sql(
+        cur,
+        """
+        UPDATE dim_catalogo_agentes
+        SET tipo_agente = ''
+        WHERE LOWER(TRIM(COALESCE(tipo_agente, ''))) IN ('nan', 'none', 'null', '<na>')
+        """,
+    )
+    ejecutar_sql(
+        cur,
+        """
+        UPDATE dim_catalogo_nodos
+        SET nombre_nodo = ''
+        WHERE LOWER(TRIM(COALESCE(nombre_nodo, ''))) IN ('nan', 'none', 'null', '<na>')
+        """,
+    )
+
     nodos_bd = ejecutar_consulta_df(
         "SELECT DISTINCT codigo_nodo AS cod FROM fact_precios_exante WHERE codigo_nodo IS NOT NULL",
         conn,
@@ -244,11 +279,13 @@ def inicializar_y_sincronizar_catalogo(conn):
                 ON CONFLICT (codigo_agente) DO UPDATE SET
                     pais = COALESCE(NULLIF(dim_catalogo_agentes.pais, ''), excluded.pais),
                     nombre_agente = CASE
-                        WHEN COALESCE(TRIM(dim_catalogo_agentes.nombre_agente), '') = '' THEN excluded.nombre_agente
+                        WHEN LOWER(TRIM(COALESCE(dim_catalogo_agentes.nombre_agente, ''))) IN ('', 'nan', 'none', 'null', '<na>')
+                        THEN excluded.nombre_agente
                         ELSE dim_catalogo_agentes.nombre_agente
                     END,
                     tipo_agente = CASE
-                        WHEN COALESCE(TRIM(dim_catalogo_agentes.tipo_agente), '') = '' THEN excluded.tipo_agente
+                        WHEN LOWER(TRIM(COALESCE(dim_catalogo_agentes.tipo_agente, ''))) IN ('', 'nan', 'none', 'null', '<na>')
+                        THEN excluded.tipo_agente
                         ELSE dim_catalogo_agentes.tipo_agente
                     END
                 """,
@@ -307,8 +344,8 @@ def cargar_mapa_etiquetas_nodos():
         mapa = {}
         for _, r in df_cat.iterrows():
             cod = limpiar_codigo(r["codigo_nodo"])
-            nom = str(r["nombre_nodo"] or "").strip()
-            pais = str(r["pais"] or "").strip()
+            nom = limpiar_texto_catalogo(r["nombre_nodo"])
+            pais = limpiar_texto_catalogo(r["pais"])
             mapa[cod] = f"{cod} - {nom} ({pais})" if nom else f"{cod} ({pais})"
         return mapa
     except Exception:
@@ -320,7 +357,7 @@ def cargar_mapa_etiquetas_nodos():
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_diccionario_agentes_cache():
     mapa = {
-        limpiar_codigo(cod): nom.strip()
+        limpiar_codigo(cod): limpiar_texto_catalogo(nom)
         for cod, (nom, _) in DIRECTORIO_AGENTES_MER.items()
     }
     c = obtener_conexion()
@@ -328,8 +365,9 @@ def cargar_diccionario_agentes_cache():
         asegurar_esquema(c)
         mapa_bd = obtener_diccionario_agentes(c)
         for cod, nom in mapa_bd.items():
-            if nom and nom.strip():
-                mapa[limpiar_codigo(cod)] = nom.strip()
+            nom_clean = limpiar_texto_catalogo(nom)
+            if nom_clean:
+                mapa[limpiar_codigo(cod)] = nom_clean
         return mapa
     except Exception:
         return mapa
@@ -695,7 +733,7 @@ with tab_reportes:
                 lista_ag_nac = sorted(pares_tcp["agente_nac"].unique().tolist())
 
                 def fmt_ag(cod):
-                    nom = mapa_agentes.get(limpiar_codigo(cod), "")
+                    nom = limpiar_texto_catalogo(mapa_agentes.get(limpiar_codigo(cod), ""))
                     return f"{cod} - {nom}" if nom else cod
 
                 ag_nac_sel = st.selectbox(
@@ -728,11 +766,11 @@ with tab_reportes:
             cp_clean = limpiar_codigo(cp_sel)
             ag_nac_clean = limpiar_codigo(ag_nac_sel)
 
-            nom_default_sumin = mapa_agentes.get(cp_clean) or cp_clean
+            nom_default_sumin = limpiar_texto_catalogo(mapa_agentes.get(cp_clean)) or cp_clean
             nom_default_recep = (
                 "ENEE"
                 if "ENEE" in ag_nac_clean
-                else (mapa_agentes.get(ag_nac_clean) or ag_nac_clean)
+                else (limpiar_texto_catalogo(mapa_agentes.get(ag_nac_clean)) or ag_nac_clean)
             )
             nom_default_elab = usuario_actual.get("nombre", "")
 
@@ -1043,6 +1081,10 @@ with tab_reportes:
 
         with tab_ag_tcp_hora:
             if not df_tcp_ag.empty:
+                for col_nom in ("Nombre_Agente", "Nombre_Contraparte"):
+                    if col_nom in df_tcp_ag.columns:
+                        df_tcp_ag[col_nom] = df_tcp_ag[col_nom].apply(limpiar_texto_catalogo)
+
                 f_col1, f_col2, f_col3 = st.columns(3)
                 with f_col1:
                     agentes_tcp_opts = ["TODOS"] + sorted(df_tcp_ag["Agente_Nacional"].unique().tolist())
@@ -1098,6 +1140,9 @@ with tab_reportes:
 
         with tab_ag_top_hora:
             if not df_top_ag.empty:
+                if "Nombre_Agente" in df_top_ag.columns:
+                    df_top_ag["Nombre_Agente"] = df_top_ag["Nombre_Agente"].apply(limpiar_texto_catalogo)
+
                 t_col1, t_col2 = st.columns(2)
                 with t_col1:
                     agentes_top_opts = ["TODOS"] + sorted(df_top_ag["Agente_Nacional"].unique().tolist())
@@ -1278,6 +1323,10 @@ with tab_catalogo:
         finally:
             c_cat_n.close()
 
+        for col_n in ("nombre_nodo", "subestacion", "nivel_kv"):
+            if col_n in df_nodos_cat.columns:
+                df_nodos_cat[col_n] = df_nodos_cat[col_n].apply(limpiar_texto_catalogo)
+
         if es_admin:
             edited_nodos = st.data_editor(
                 df_nodos_cat,
@@ -1306,7 +1355,12 @@ with tab_catalogo:
                         SET nombre_nodo = ?, subestacion = ?, nivel_kv = ?
                         WHERE codigo_nodo = ?
                         """,
-                        (row["nombre_nodo"] or "", row["subestacion"] or "", row["nivel_kv"] or "", row["codigo_nodo"]),
+                        (
+                            limpiar_texto_catalogo(row["nombre_nodo"]),
+                            limpiar_texto_catalogo(row["subestacion"]),
+                            limpiar_texto_catalogo(row["nivel_kv"]),
+                            row["codigo_nodo"],
+                        ),
                     )
                 c_save_n.commit()
                 cur.close()
@@ -1327,6 +1381,10 @@ with tab_catalogo:
             )
         finally:
             c_cat_a.close()
+
+        for col_a in ("nombre_agente", "tipo_agente"):
+            if col_a in df_agentes_cat.columns:
+                df_agentes_cat[col_a] = df_agentes_cat[col_a].apply(limpiar_texto_catalogo)
 
         if es_admin:
             edited_agentes = st.data_editor(
@@ -1355,7 +1413,11 @@ with tab_catalogo:
                         SET nombre_agente = ?, tipo_agente = ?
                         WHERE codigo_agente = ?
                         """,
-                        (row["nombre_agente"] or "", row["tipo_agente"] or "", row["codigo_agente"]),
+                        (
+                            limpiar_texto_catalogo(row["nombre_agente"]),
+                            limpiar_texto_catalogo(row["tipo_agente"]),
+                            row["codigo_agente"],
+                        ),
                     )
                 c_save_a.commit()
                 cur.close()
@@ -1373,8 +1435,17 @@ with tab_catalogo:
             asegurar_esquema(c_xl_cat)
             buffer_cat = io.BytesIO()
             with pd.ExcelWriter(buffer_cat, engine="openpyxl") as writer:
-                ejecutar_consulta_df("SELECT * FROM dim_catalogo_nodos ORDER BY codigo_nodo", c_xl_cat).to_excel(writer, sheet_name="Nodos", index=False)
-                ejecutar_consulta_df("SELECT * FROM dim_catalogo_agentes ORDER BY pais, codigo_agente", c_xl_cat).to_excel(writer, sheet_name="Agentes", index=False)
+                df_n_xl = ejecutar_consulta_df("SELECT * FROM dim_catalogo_nodos ORDER BY codigo_nodo", c_xl_cat)
+                for col_n in ("nombre_nodo", "subestacion", "nivel_kv"):
+                    if col_n in df_n_xl.columns:
+                        df_n_xl[col_n] = df_n_xl[col_n].apply(limpiar_texto_catalogo)
+                df_n_xl.to_excel(writer, sheet_name="Nodos", index=False)
+
+                df_a_xl = ejecutar_consulta_df("SELECT * FROM dim_catalogo_agentes ORDER BY pais, codigo_agente", c_xl_cat)
+                for col_a in ("nombre_agente", "tipo_agente"):
+                    if col_a in df_a_xl.columns:
+                        df_a_xl[col_a] = df_a_xl[col_a].apply(limpiar_texto_catalogo)
+                df_a_xl.to_excel(writer, sheet_name="Agentes", index=False)
         finally:
             c_xl_cat.close()
 
@@ -1405,7 +1476,13 @@ with tab_catalogo:
                                 subestacion=excluded.subestacion,
                                 nivel_kv=excluded.nivel_kv
                             """,
-                            (limpiar_codigo(r["codigo_nodo"]), str(r["pais"]).strip(), str(r["nombre_nodo"]).strip(), str(r["subestacion"]).strip(), str(r["nivel_kv"]).strip()),
+                            (
+                                limpiar_codigo(r["codigo_nodo"]),
+                                limpiar_texto_catalogo(r["pais"]),
+                                limpiar_texto_catalogo(r["nombre_nodo"]),
+                                limpiar_texto_catalogo(r["subestacion"]),
+                                limpiar_texto_catalogo(r["nivel_kv"]),
+                            ),
                         )
                 if "Agentes" in xl_cat.sheet_names:
                     df_a_up = pd.read_excel(xl_cat, sheet_name="Agentes").fillna("")
@@ -1419,7 +1496,12 @@ with tab_catalogo:
                                 nombre_agente=excluded.nombre_agente,
                                 tipo_agente=excluded.tipo_agente
                             """,
-                            (limpiar_codigo(r["codigo_agente"]), str(r["pais"]).strip(), str(r["nombre_agente"]).strip(), str(r["tipo_agente"]).strip()),
+                            (
+                                limpiar_codigo(r["codigo_agente"]),
+                                limpiar_texto_catalogo(r["pais"]),
+                                limpiar_texto_catalogo(r["nombre_agente"]),
+                                limpiar_texto_catalogo(r["tipo_agente"]),
+                            ),
                         )
                 c_up_cat.commit()
                 cur.close()
