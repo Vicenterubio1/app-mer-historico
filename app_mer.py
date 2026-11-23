@@ -163,7 +163,7 @@ es_admin = usuario_actual["rol"] == "admin"
 # FUNCIONES DE CATÁLOGO MAESTRO E INICIALIZACIÓN
 # ==========================================
 def inicializar_y_sincronizar_catalogo(conn):
-    """Puebla tablas de catálogo con códigos nuevos detectados en la BD (compatible SQLite y PostgreSQL)."""
+    """Puebla tablas de catálogo con códigos nuevos detectados en la BD y el directorio oficial MER."""
     asegurar_esquema(conn)
     cur = conn.cursor()
     ejecutar_sql(
@@ -189,28 +189,6 @@ def inicializar_y_sincronizar_catalogo(conn):
         )
         """,
     )
-    for cod_reg, (razon_social, actividad) in DIRECTORIO_AGENTES_MER.items():
-        cod_clean = limpiar_codigo(cod_reg)
-        if cod_clean:
-            pais_reg = PREFIJO_PAIS.get(cod_clean[0], "OTRO")
-            ejecutar_sql(
-                cur,
-                """
-                INSERT INTO dim_catalogo_agentes (codigo_agente, pais, nombre_agente, tipo_agente)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (codigo_agente) DO UPDATE SET
-                    pais = COALESCE(NULLIF(dim_catalogo_agentes.pais, ''), excluded.pais),
-                    nombre_agente = CASE
-                        WHEN COALESCE(TRIM(dim_catalogo_agentes.nombre_agente), '') = '' THEN excluded.nombre_agente
-                        ELSE dim_catalogo_agentes.nombre_agente
-                    END,
-                    tipo_agente = CASE
-                        WHEN COALESCE(TRIM(dim_catalogo_agentes.tipo_agente), '') = '' THEN excluded.tipo_agente
-                        ELSE dim_catalogo_agentes.tipo_agente
-                    END
-                """,
-                (cod_clean, pais_reg, razon_social.strip(), actividad.strip()),
-            )
     conn.commit()
 
     nodos_bd = ejecutar_consulta_df(
@@ -253,6 +231,30 @@ def inicializar_y_sincronizar_catalogo(conn):
                     "INSERT INTO dim_catalogo_agentes (codigo_agente, pais) VALUES (?, ?) ON CONFLICT (codigo_agente) DO NOTHING",
                     (cod_clean, row["pais"]),
                 )
+
+    for cod_reg, (razon_social, actividad) in DIRECTORIO_AGENTES_MER.items():
+        cod_clean = limpiar_codigo(cod_reg)
+        if cod_clean:
+            pais_reg = PREFIJO_PAIS.get(cod_clean[0], "OTRO")
+            ejecutar_sql(
+                cur,
+                """
+                INSERT INTO dim_catalogo_agentes (codigo_agente, pais, nombre_agente, tipo_agente)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (codigo_agente) DO UPDATE SET
+                    pais = COALESCE(NULLIF(dim_catalogo_agentes.pais, ''), excluded.pais),
+                    nombre_agente = CASE
+                        WHEN COALESCE(TRIM(dim_catalogo_agentes.nombre_agente), '') = '' THEN excluded.nombre_agente
+                        ELSE dim_catalogo_agentes.nombre_agente
+                    END,
+                    tipo_agente = CASE
+                        WHEN COALESCE(TRIM(dim_catalogo_agentes.tipo_agente), '') = '' THEN excluded.tipo_agente
+                        ELSE dim_catalogo_agentes.tipo_agente
+                    END
+                """,
+                (cod_clean, pais_reg, razon_social.strip(), actividad.strip()),
+            )
+
     conn.commit()
     cur.close()
 
@@ -384,7 +386,6 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
             params=params_filtro,
         )
 
-        # Ventas Oportunidad desde CNFFF + O.I. Flexibilidad en TCP
         df_flex_res = ejecutar_consulta_df(
             f"""
             SELECT SUM(ABS(mw_predespachados)) AS mwh
@@ -411,7 +412,6 @@ def cargar_datos_indicadores_y_precios(f_ini, f_fin, pais_cod):
                     ignore_index=True,
                 )
 
-        # Compras ('r') se mantienen íntegras; en Ventas ('i') de TCP se excluyen las flexibilizadas a Oportunidad
         df_tcp_res = ejecutar_consulta_df(
             f"""
             SELECT LOWER(TRIM(tipo_transaccion)) AS tipo,
@@ -695,7 +695,7 @@ with tab_reportes:
                 lista_ag_nac = sorted(pares_tcp["agente_nac"].unique().tolist())
 
                 def fmt_ag(cod):
-                    nom = mapa_agentes.get(cod, "")
+                    nom = mapa_agentes.get(limpiar_codigo(cod), "")
                     return f"{cod} - {nom}" if nom else cod
 
                 ag_nac_sel = st.selectbox(
@@ -724,7 +724,7 @@ with tab_reportes:
                 )
                 tipo_tr_cnd = sentido_cnd.split(" - ")[0]
 
-           col_nom1, col_nom2, col_nom3 = st.columns(3)
+            col_nom1, col_nom2, col_nom3 = st.columns(3)
             cp_clean = limpiar_codigo(cp_sel)
             ag_nac_clean = limpiar_codigo(ag_nac_sel)
 
@@ -1247,7 +1247,7 @@ with tab_reportes:
 # ------------------------------------------
 with tab_catalogo:
     st.subheader("🏷️ Catálogo de Nombres Reales (Nodos y Agentes)")
-    st.markdown("Los códigos se detectan automáticamente de los archivos `PUB004` (incluyendo los Agentes Contraparte).")
+    st.markdown("Los códigos se detectan automáticamente de los archivos `PUB004` y se vinculan con el directorio oficial del MER.")
 
     if not es_admin:
         st.info(f"🔒 Sesión de **{usuario_actual['nombre']}** (Solo Consulta). Únicamente usuarios administradores pueden editar nombres.")
