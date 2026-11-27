@@ -334,7 +334,35 @@ def inicializar_y_sincronizar_catalogo(conn):
                 """,
                 (cod_clean, pais_reg, razon_social.strip(), actividad.strip()),
             )
-
+agentes_hn_cat = ejecutar_consulta_df(
+    """
+    SELECT codigo_agente, nombre_agente
+      FROM dim_catalogo_agentes
+     WHERE UPPER(TRIM(COALESCE(pais, ''))) = 'HN'
+        OR UPPER(TRIM(codigo_agente)) LIKE '3%'
+    """,
+    conn,
+)
+if not agentes_hn_cat.empty:
+    for _, row in agentes_hn_cat.iterrows():
+        cod_nac = limpiar_codigo(row.get("codigo_agente")).upper()
+        if cod_nac and cod_nac.startswith("3"):
+            nom_nac = limpiar_texto_catalogo(row.get("nombre_agente"))
+            ejecutar_sql(
+                cur,
+                """
+                INSERT INTO dim_agentes_nacionales (codigo_agente, nombre_agente, activo)
+                VALUES (?, ?, 1)
+                ON CONFLICT (codigo_agente) DO UPDATE SET
+                    nombre_agente = CASE
+                        WHEN TRIM(COALESCE(dim_agentes_nacionales.nombre_agente, '')) = ''
+                             AND ? != ''
+                        THEN ?
+                        ELSE dim_agentes_nacionales.nombre_agente
+                    END
+                """,
+                (cod_nac, nom_nac, nom_nac, nom_nac),
+            )
     conn.commit()
     cur.close()
 
