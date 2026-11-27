@@ -51,6 +51,28 @@ from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
 
 st.set_page_config(page_title="Gestión Histórica MER", page_icon="⚡", layout="wide")
 
+MAX_BYTES_DECL = 10 * 1024 * 1024  # 10 MB para declaraciones (.xlsx, .xlsm, .xml)
+MAX_BYTES_ZIP = 25 * 1024 * 1024   # 25 MB por archivo ZIP en ingesta
+
+CLAVES_SESION_LIMPIABLES = [
+    "pdf_diario_ag_bytes",
+    "pdf_diario_ag_nombre",
+    "pdf_cnd_bytes",
+    "pdf_cnd_nombre",
+    "pdf_anual_bytes",
+    "pdf_anual_nombre",
+    "pdf_cv_bytes",
+    "pdf_cv_nombre",
+    "xlsx_bytes",
+    "xlsx_nombre",
+    "ultimo_log_ingesta",
+]
+
+
+def limpiar_estado_sesion_usuario():
+    for clave in CLAVES_SESION_LIMPIABLES:
+        st.session_state.pop(clave, None)
+
 
 def limpiar_codigo(val):
     if pd.isna(val):
@@ -122,6 +144,7 @@ def pantalla_login():
     clave_visitante_legacy = obtener_secreto("VISITOR_PASSWORD")
 
     if not usuarios_cfg and not clave_admin_legacy and not clave_visitante_legacy:
+        limpiar_estado_sesion_usuario()
         st.session_state["usuario_activo"] = {
             "usuario": "local",
             "nombre": "Administrador Local",
@@ -144,6 +167,7 @@ def pantalla_login():
             ingresar = st.form_submit_button("🔓 Ingresar al Sistema", type="primary", use_container_width=True)
 
             if ingresar:
+                limpiar_estado_sesion_usuario()
                 if usr_in and usr_in in usuarios_cfg:
                     datos_u = usuarios_cfg[usr_in]
                     pwd_real = str(datos_u.get("password", "")).strip()
@@ -764,28 +788,35 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
         st.error(f"**{semaforo['estado_texto']}** — {semaforo['detalle']}")
 
     permitir_envio = bool(semaforo["habilitado"])
+    uso_excepcional_admin = False
     if not permitir_envio and es_admin:
-        permitir_envio = st.checkbox(
+        uso_excepcional_admin = st.checkbox(
             "🔓 Habilitar carga administrativa excepcional (fuera de horario/ventana)",
             value=False,
             key="decl_override_admin",
         )
+        permitir_envio = bool(uso_excepcional_admin)
 
     if "uploader_decl_key" not in st.session_state:
         st.session_state["uploader_decl_key"] = 0
 
     archivo_decl = st.file_uploader(
-        "Subir archivo de declaración de contratos (.xlsm, .xlsx o .xml):",
+        "Subir archivo de declaración de contratos (.xlsm, .xlsx o .xml) — máx. 10 MB:",
         type=["xlsm", "xlsx", "xml"],
         disabled=not permitir_envio,
         key=f"decl_uploader_{st.session_state['uploader_decl_key']}",
     )
 
     if archivo_decl is not None:
+        raw_bytes = archivo_decl.getvalue()
+        if len(raw_bytes) > MAX_BYTES_DECL:
+            st.error("⛔ El archivo supera el límite máximo permitido de 10 MB.")
+            st.stop()
+
         c_val = obtener_conexion()
         try:
             asegurar_esquema(c_val)
-            meta_p, regs_p, hall_p = parsear_archivo_declaracion(archivo_decl.getvalue(), archivo_decl.name)
+            meta_p, regs_p, hall_p = parsear_archivo_declaracion(raw_bytes, archivo_decl.name)
             regs_limpios, df_hallazgos, bloqueado = validar_declaracion_contratos(
                 meta=meta_p,
                 registros=regs_p,
@@ -833,6 +864,10 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
                 disabled=not (permitir_envio and confirmar_adv),
                 key="btn_guardar_decl",
             ):
+                usuario_traza = usuario_actual.get("usuario", "usuario")
+                if es_admin and uso_excepcional_admin and not semaforo["habilitado"]:
+                    usuario_traza = f"{usuario_traza} [EXCEPCIONAL]"
+
                 c_save = obtener_conexion()
                 try:
                     asegurar_esquema(c_save)
@@ -840,7 +875,7 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
                         conn=c_save,
                         fecha_operacion=fecha_decl_iso,
                         codigo_agente=agente_decl_sel,
-                        usuario_envio=usuario_actual.get("usuario", "usuario"),
+                        usuario_envio=usuario_traza,
                         rol_envio=usuario_actual.get("rol", "agente"),
                         nombre_archivo=archivo_decl.name,
                         meta=meta_p,
@@ -968,6 +1003,7 @@ st.sidebar.markdown(f"### 👋 Hola, **{usuario_actual['nombre']}**")
 st.sidebar.caption(f"Usuario: `{usuario_actual['usuario']}` · Rol: **{rol_badge}**")
 
 if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
+    limpiar_estado_sesion_usuario()
     st.session_state["usuario_activo"] = None
     st.rerun()
 
@@ -2134,6 +2170,9 @@ with tab_catalogo:
         if es_admin:
             archivo_cat_up = st.file_uploader("Subir Plantilla_Catalogo_MER.xlsx completada", type=["xlsx"])
             if archivo_cat_up and st.button("⬆️ Actualizar Catálogo desde Excel"):
+                if len(archivo_cat_up.getvalue()) > MAX_BYTES_DECL:
+                    st.error("⛔ El archivo supera el límite de 10 MB.")
+                    st.stop()
                 xl_cat = pd.ExcelFile(archivo_cat_up)
                 c_up_cat = obtener_conexion()
                 asegurar_esquema(c_up_cat)
@@ -2192,7 +2231,7 @@ if es_admin and tab_ingesta is not None:
     with tab_ingesta:
         st.subheader("Cargar Predespachos Regionales (PUB004-*.zip)")
         st.markdown("""
-        Arrastra aquí los archivos `.zip` descargados del EOR. El sistema detectará automáticamente:
+        Arrastra aquí los archivos `.zip` descargados del EOR (máx. 25 MB por archivo). El sistema detectará automáticamente:
 - **Nuevos días operativos** (`[NUEVO]`)
 - **Modificaciones o redespachos** publicados más tarde (`[UPDATE]`), reemplazando las versiones obsoletas.
 - **Archivos ya existentes o más antiguos** (`[SKIP]`), omitiéndolos para proteger las versiones vigentes.
@@ -2206,27 +2245,35 @@ if es_admin and tab_ingesta is not None:
         )
 
         if archivos_subidos:
-            st.info(f"{len(archivos_subidos)} archivo(s) listo(s) para procesar.")
-            if st.button("🚀 Procesar y Guardar en Base de Datos", type="primary"):
-                log_buffer = io.StringIO()
-                with st.spinner("Leyendo archivos Excel y actualizando base de datos..."):
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        for up_file in archivos_subidos:
-                            ruta_tmp = os.path.join(tmpdir, up_file.name)
-                            with open(ruta_tmp, "wb") as f_out:
-                                f_out.write(up_file.getbuffer())
+            archivos_validos = []
+            for up_file in archivos_subidos:
+                if len(up_file.getbuffer()) > MAX_BYTES_ZIP:
+                    st.error(f"⛔ '{up_file.name}' supera el límite de 25 MB y fue omitido.")
+                else:
+                    archivos_validos.append(up_file)
 
-                        with contextlib.redirect_stdout(log_buffer):
-                            procesar_carpeta(tmpdir)
+            if archivos_validos:
+                st.info(f"{len(archivos_validos)} archivo(s) listo(s) para procesar.")
+                if st.button("🚀 Procesar y Guardar en Base de Datos", type="primary"):
+                    log_buffer = io.StringIO()
+                    with st.spinner("Leyendo archivos Excel y actualizando base de datos..."):
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            for up_file in archivos_validos:
+                                ruta_tmp = os.path.join(tmpdir, os.path.basename(up_file.name))
+                                with open(ruta_tmp, "wb") as f_out:
+                                    f_out.write(up_file.getbuffer())
 
-                    c_sync = obtener_conexion()
-                    inicializar_y_sincronizar_catalogo(c_sync)
-                    c_sync.close()
+                            with contextlib.redirect_stdout(log_buffer):
+                                procesar_carpeta(tmpdir)
 
-                st.cache_data.clear()
-                st.session_state["ultimo_log_ingesta"] = log_buffer.getvalue().strip()
-                st.session_state["uploader_zip_key"] += 1
-                st.rerun()
+                        c_sync = obtener_conexion()
+                        inicializar_y_sincronizar_catalogo(c_sync)
+                        c_sync.close()
+
+                    st.cache_data.clear()
+                    st.session_state["ultimo_log_ingesta"] = log_buffer.getvalue().strip()
+                    st.session_state["uploader_zip_key"] += 1
+                    st.rerun()
 
         if "ultimo_log_ingesta" in st.session_state:
             st.success("✅ ¡Sincronización completada y catálogo actualizado!")
