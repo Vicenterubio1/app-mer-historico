@@ -5,7 +5,8 @@ import io
 import hmac
 import tempfile
 import contextlib
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from db_mer import (
     obtener_conexion,
@@ -34,6 +35,17 @@ from reporte_anual_cnd_pdf import (
 from reporte_diario_agente_pdf import (
     construir_datos_diarios_agente,
     generar_pdf_diario_agente_cnd,
+)
+from declaraciones_contratos import (
+    evaluar_semaforo_declaracion,
+    parsear_archivo_declaracion,
+    validar_declaracion_contratos,
+    guardar_declaracion_agente,
+    obtener_envios_fecha,
+    obtener_detalle_consolidado_fecha,
+    generar_excel_consolidado_eor,
+    generar_xml_consolidado_eor,
+    ZONA_HN,
 )
 from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
 
@@ -114,6 +126,7 @@ def pantalla_login():
             "usuario": "local",
             "nombre": "Administrador Local",
             "rol": "admin",
+            "agente": "",
         }
         return True
 
@@ -136,12 +149,14 @@ def pantalla_login():
                     pwd_real = str(datos_u.get("password", "")).strip()
                     if verificar_clave(pwd_in, pwd_real):
                         rol_u = str(datos_u.get("rol", "visitante")).strip().lower()
-                        if rol_u not in ("admin", "visitante"):
+                        if rol_u not in ("admin", "visitante", "agente"):
                             rol_u = "visitante"
+                        ag_u = str(datos_u.get("agente", datos_u.get("codigo_agente", ""))).strip()
                         st.session_state["usuario_activo"] = {
                             "usuario": usr_in,
                             "nombre": str(datos_u.get("nombre", usr_in)).strip(),
                             "rol": rol_u,
+                            "agente": ag_u,
                         }
                         st.rerun()
                     else:
@@ -151,6 +166,7 @@ def pantalla_login():
                         "usuario": "admin",
                         "nombre": "Administrador",
                         "rol": "admin",
+                        "agente": "",
                     }
                     st.rerun()
                 elif not usr_in and verificar_clave(pwd_in, clave_visitante_legacy):
@@ -158,6 +174,7 @@ def pantalla_login():
                         "usuario": "visitante",
                         "nombre": "Usuario Consulta",
                         "rol": "visitante",
+                        "agente": "",
                     }
                     st.rerun()
                 else:
@@ -170,6 +187,7 @@ if not pantalla_login():
 
 usuario_actual = st.session_state["usuario_activo"]
 es_admin = usuario_actual["rol"] == "admin"
+es_agente = usuario_actual["rol"] == "agente"
 
 
 # ==========================================
@@ -610,6 +628,243 @@ def cargar_auditoria_cache():
         c.close()
 
 
+def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
+    """Renderiza el módulo de recepción de declaraciones de contratos con semáforo e integración EOR."""
+    st.subheader("🚦 Declaración de Contratos Regionales (Agentes → EOR)")
+    st.caption(
+        "Recepción diaria de contratos para integrar en la plantilla y archivo XML del EOR. "
+        "Regla de horario (Hora Honduras): declaraciones para **mañana** habilitadas hasta las **09:00 AM**; "
+        "declaraciones para **después de mañana** habilitadas sin restricción."
+    )
+
+    def _fmt_ag_decl(cod):
+        nom = limpiar_texto_catalogo(mapa_agentes_dict.get(limpiar_codigo(cod), ""))
+        return f"{cod} - {nom}" if nom else cod
+
+    fecha_defecto = datetime.now(ZONA_HN).date() + timedelta(days=1)
+    lista_agentes_hn = sorted([c for c in DIRECTORIO_AGENTES_MER.keys() if str(c).startswith("3")])
+    lista_todos_ag = sorted(list(DIRECTORIO_AGENTES_MER.keys()))
+    opciones_ag_decl = lista_agentes_hn if lista_agentes_hn else lista_todos_ag
+
+    col_f, col_ag, col_plantilla = st.columns([1.0, 1.8, 1.2])
+    with col_f:
+        fecha_decl_sel = st.date_input(
+            "Fecha Operativa a Declarar:",
+            value=fecha_defecto,
+            key="decl_fecha_op",
+        )
+    with col_ag:
+        if es_admin:
+            idx_def = opciones_ag_decl.index("3DENEE") if "3DENEE" in opciones_ag_decl else 0
+            agente_decl_sel = st.selectbox(
+                "Agente Nacional Declarante:",
+                options=opciones_ag_decl,
+                index=idx_def,
+                format_func=_fmt_ag_decl,
+                key="decl_agente_sel",
+            )
+        else:
+            ag_asignado = limpiar_codigo(usuario_actual.get("agente", ""))
+            if ag_asignado:
+                agente_decl_sel = ag_asignado
+                st.text_input(
+                    "Agente Autorizado:",
+                    value=_fmt_ag_decl(agente_decl_sel),
+                    disabled=True,
+                    key="decl_agente_fijo",
+                )
+            else:
+                agente_decl_sel = st.selectbox(
+                    "Agente Autorizado:",
+                    options=opciones_ag_decl,
+                    format_func=_fmt_ag_decl,
+                    key="decl_agente_fallback",
+                )
+
+    fecha_decl_iso = fecha_decl_sel.strftime("%Y-%m-%d")
+
+    with col_plantilla:
+        st.markdown("<br>", unsafe_allow_html=True)
+        plantilla_vacia_bytes = generar_excel_consolidado_eor(
+            df_detalle=pd.DataFrame(),
+            fecha_operacion=fecha_decl_iso,
+            ruta_plantilla="HON20261129.xlsm",
+        )
+        st.download_button(
+            label="📥 Plantilla Base Excel (.xlsx)",
+            data=plantilla_vacia_bytes,
+            file_name=f"Plantilla_Contratos_EOR_{fecha_decl_iso.replace('-', '')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_plantilla_vacia_decl",
+        )
+
+    semaforo = evaluar_semaforo_declaracion(fecha_decl_iso)
+    if semaforo["color"] == "VERDE":
+        st.success(f"**{semaforo['estado_texto']}** — {semaforo['detalle']}")
+    else:
+        st.error(f"**{semaforo['estado_texto']}** — {semaforo['detalle']}")
+
+    permitir_envio = bool(semaforo["habilitado"])
+    if not permitir_envio and es_admin:
+        permitir_envio = st.checkbox(
+            "🔓 Habilitar carga administrativa excepcional (fuera de horario/ventana)",
+            value=False,
+            key="decl_override_admin",
+        )
+
+    if "uploader_decl_key" not in st.session_state:
+        st.session_state["uploader_decl_key"] = 0
+
+    archivo_decl = st.file_uploader(
+        "Subir declaración de contratos del agente (.xlsm, .xlsx o .xml):",
+        type=["xlsm", "xlsx", "xml"],
+        disabled=not permitir_envio,
+        key=f"decl_uploader_{st.session_state['uploader_decl_key']}",
+    )
+
+    if archivo_decl is not None:
+        c_val = obtener_conexion()
+        try:
+            asegurar_esquema(c_val)
+            meta_p, regs_p, hall_p = parsear_archivo_declaracion(archivo_decl.getvalue(), archivo_decl.name)
+            regs_limpios, df_hallazgos, bloqueado = validar_declaracion_contratos(
+                meta=meta_p,
+                registros=regs_p,
+                fecha_operacion_esperada=fecha_decl_iso,
+                codigo_agente_autorizado=agente_decl_sel,
+                es_admin=bool(es_admin),
+                conn=c_val,
+                hallazgos_previos=hall_p,
+            )
+        finally:
+            c_val.close()
+
+        n_err = int((df_hallazgos["severidad"] == "ERROR").sum()) if not df_hallazgos.empty else 0
+        n_adv = int((df_hallazgos["severidad"] == "ADVERTENCIA").sum()) if not df_hallazgos.empty else 0
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Filas de contrato detectadas", len(regs_limpios))
+        m2.metric("Errores bloqueantes", n_err)
+        m3.metric("Advertencias", n_adv)
+
+        if not df_hallazgos.empty:
+            st.markdown("**Detalle de Validación:**")
+            st.dataframe(df_hallazgos, use_container_width=True, hide_index=True)
+
+        if regs_limpios:
+            with st.expander("👁️ Vista previa de registros detectados", expanded=False):
+                st.dataframe(pd.DataFrame(regs_limpios), use_container_width=True, hide_index=True)
+
+        if bloqueado:
+            st.error("⛔ El archivo contiene **ERRORES bloqueantes**. Corrígelos y vuelve a subirlo.")
+        else:
+            if n_adv == 0:
+                st.success("✅ Validación exitosa sin errores ni advertencias.")
+            confirmar_adv = True
+            if n_adv > 0:
+                confirmar_adv = st.checkbox(
+                    "Confirmo que revisé las advertencias y deseo registrar esta declaración.",
+                    value=False,
+                    key="decl_conf_adv",
+                )
+
+            if st.button(
+                "💾 Enviar y Registrar Declaración (pasa a ser la última vigente)",
+                type="primary",
+                disabled=not (permitir_envio and confirmar_adv),
+                key="btn_guardar_decl",
+            ):
+                c_save = obtener_conexion()
+                try:
+                    asegurar_esquema(c_save)
+                    id_nv = guardar_declaracion_agente(
+                        conn=c_save,
+                        fecha_operacion=fecha_decl_iso,
+                        codigo_agente=agente_decl_sel,
+                        usuario_envio=usuario_actual.get("usuario", "usuario"),
+                        rol_envio=usuario_actual.get("rol", "agente"),
+                        nombre_archivo=archivo_decl.name,
+                        meta=meta_p,
+                        registros_limpios=regs_limpios,
+                        total_errores=n_err,
+                        total_advertencias=n_adv,
+                    )
+                finally:
+                    c_save.close()
+
+                st.session_state["uploader_decl_key"] += 1
+                st.success(
+                    f"✅ Declaración **#{id_nv}** registrada como **VIGENTE** para `{agente_decl_sel}` "
+                    f"(Fecha operativa: `{fecha_decl_iso}`). Si había un envío anterior para este día, quedó marcado como `REEMPLAZADA`."
+                )
+                st.rerun()
+
+    st.divider()
+    st.markdown(f"### 📋 Historial de Declaraciones Recibidas ({fecha_decl_iso})")
+    c_hist = obtener_conexion()
+    try:
+        asegurar_esquema(c_hist)
+        df_envios = obtener_envios_fecha(c_hist, fecha_decl_iso, None if es_admin else agente_decl_sel)
+        df_cons = obtener_detalle_consolidado_fecha(c_hist, fecha_decl_iso) if es_admin else pd.DataFrame()
+    finally:
+        c_hist.close()
+
+    if not df_envios.empty:
+        st.dataframe(df_envios, use_container_width=True, hide_index=True)
+    else:
+        st.info(f"Aún no se han recibido declaraciones de contratos para `{fecha_decl_iso}`.")
+
+    if es_admin:
+        st.divider()
+        st.markdown(f"### 🧩 Integración Consolidada para EOR (`{fecha_decl_iso}`)")
+        st.caption(
+            "Incluye únicamente la **última declaración vigente** de cada agente para esta fecha operativa."
+        )
+
+        if df_cons.empty:
+            st.info("No hay declaraciones vigentes para consolidar en esta fecha.")
+        else:
+            agentes_incluidos = sorted(df_cons["codigo_agente"].unique().tolist())
+            st.success(
+                f"**{len(agentes_incluidos)} agente(s)** integrados ({', '.join(agentes_incluidos)}) · "
+                f"**{len(df_cons)} fila(s)** vigentes listas para el EOR."
+            )
+            st.dataframe(df_cons, use_container_width=True, hide_index=True)
+
+            col_ex1, col_ex2 = st.columns(2)
+            with col_ex1:
+                xlsx_cons_bytes = generar_excel_consolidado_eor(
+                    df_detalle=df_cons,
+                    fecha_operacion=fecha_decl_iso,
+                    ruta_plantilla="HON20261129.xlsm",
+                )
+                st.download_button(
+                    label="📊 Descargar Plantilla Excel Integrada (.xlsx)",
+                    data=xlsx_cons_bytes,
+                    file_name=f"HON{fecha_decl_iso.replace('-', '')}_integrada.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="dl_decl_xlsx_eor",
+                )
+            with col_ex2:
+                xml_cons_bytes = generar_xml_consolidado_eor(
+                    df_detalle=df_cons,
+                    fecha_operacion=fecha_decl_iso,
+                    operador="ENEE-HN",
+                )
+                st.download_button(
+                    label=f"📄 Descargar XML EOR (HON{fecha_decl_iso.replace('-', '')}con.xml)",
+                    data=xml_cons_bytes,
+                    file_name=f"HON{fecha_decl_iso.replace('-', '')}con.xml",
+                    mime="application/xml",
+                    type="primary",
+                    use_container_width=True,
+                    key="dl_decl_xml_eor",
+                )
+
+
 # Inicializar entorno una única vez por proceso
 usa_pg = preparar_entorno_bd()
 
@@ -620,9 +875,15 @@ if "uploader_zip_key" not in st.session_state:
 # ENCABEZADO Y BARRA LATERAL
 # ==========================================
 st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
-st.caption("Ingesta de Predespachos (PUB004), Control de Versiones, Catálogo y Reportería Horaria / CND")
+st.caption("Ingesta de Predespachos (PUB004), Declaración de Contratos EOR, Catálogo y Reportería Horaria / CND")
 
-rol_badge = "Administrador" if es_admin else "Consulta"
+if es_admin:
+    rol_badge = "Administrador"
+elif es_agente:
+    rol_badge = f"Agente ({usuario_actual.get('agente') or 'Autorizado'})"
+else:
+    rol_badge = "Consulta"
+
 st.sidebar.markdown(f"### 👋 Hola, **{usuario_actual['nombre']}**")
 st.sidebar.caption(f"Usuario: `{usuario_actual['usuario']}` · Rol: **{rol_badge}**")
 
@@ -673,23 +934,42 @@ else:
     st.sidebar.info("Aún no hay datos cargados.")
     f_ini, f_fin, pais_cod = None, None, None
 
+mapa_agentes_global = cargar_diccionario_agentes_cache()
+
 # ==========================================
 # PESTAÑAS PRINCIPALES (SEGÚN ROL)
 # ==========================================
 if es_admin:
-    tab_reportes, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
+    tab_reportes, tab_declaraciones, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
         "📊 Reportería y Balance MER",
+        "🚦 Declaración Contratos EOR",
         "🏷️ Catálogo de Nodos y Agentes",
         "📥 Ingreso de Archivos (ZIP)",
         "🗂️ Auditoría de Base de Datos",
     ])
+elif es_agente:
+    tab_declaraciones, tab_reportes, tab_catalogo = st.tabs([
+        "🚦 Declaración Contratos EOR",
+        "📊 Reportería y Balance MER",
+        "🏷️ Catálogo de Nodos y Agentes",
+    ])
+    tab_ingesta = None
+    tab_auditoria = None
 else:
     tab_reportes, tab_catalogo, tab_auditoria = st.tabs([
         "📊 Reportería y Balance MER",
         "🏷️ Catálogo de Nodos y Agentes",
         "🗂️ Auditoría de Base de Datos",
     ])
+    tab_declaraciones = None
     tab_ingesta = None
+
+# ------------------------------------------
+# PESTAÑA: DECLARACIÓN DE CONTRATOS EOR
+# ------------------------------------------
+if tab_declaraciones is not None:
+    with tab_declaraciones:
+        renderizar_modulo_declaraciones_contratos(mapa_agentes_global)
 
 # ------------------------------------------
 # PESTAÑA 1: REPORTERÍA Y VISUALIZACIÓN
@@ -743,7 +1023,7 @@ with tab_reportes:
 
         st.divider()
 
-        mapa_agentes = cargar_diccionario_agentes_cache()
+        mapa_agentes = mapa_agentes_global
 
         def fmt_ag(cod):
             nom = limpiar_texto_catalogo(mapa_agentes.get(limpiar_codigo(cod), ""))
@@ -1702,13 +1982,14 @@ if es_admin and tab_ingesta is not None:
 # ------------------------------------------
 # PESTAÑA 4: AUDITORÍA DEL HISTORIAL
 # ------------------------------------------
-with tab_auditoria:
-    st.subheader("Estado Actual de la Base de Datos Histórica")
-    if tiene_datos:
-        df_resumen_dias, df_detalle = cargar_auditoria_cache()
-        st.dataframe(df_resumen_dias, use_container_width=True, hide_index=True)
+if tab_auditoria is not None:
+    with tab_auditoria:
+        st.subheader("Estado Actual de la Base de Datos Histórica")
+        if tiene_datos:
+            df_resumen_dias, df_detalle = cargar_auditoria_cache()
+            st.dataframe(df_resumen_dias, use_container_width=True, hide_index=True)
 
-        st.markdown("#### Detalle de Archivos Oficiales Vigentes")
-        st.dataframe(df_detalle, use_container_width=True, hide_index=True)
-    else:
-        st.info("No hay archivos registrados en la auditoría todavía.")
+            st.markdown("#### Detalle de Archivos Oficiales Vigentes")
+            st.dataframe(df_detalle, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay archivos registrados en la auditoría todavía.")
