@@ -182,6 +182,16 @@ def inicializar_tablas_declaraciones(conn):
             ejecutar_sql(
                 cur,
                 """
+                CREATE TABLE IF NOT EXISTS dim_agentes_nacionales (
+                    codigo_agente TEXT PRIMARY KEY,
+                    nombre_agente TEXT,
+                    activo INTEGER DEFAULT 1
+                );
+                """,
+            )
+            ejecutar_sql(
+                cur,
+                """
                 CREATE TABLE IF NOT EXISTS fact_declaraciones_contratos_envios (
                     id_envio SERIAL PRIMARY KEY,
                     fecha_operacion TEXT NOT NULL,
@@ -241,6 +251,16 @@ def inicializar_tablas_declaraciones(conn):
                 """,
             )
         else:
+            ejecutar_sql(
+                cur,
+                """
+                CREATE TABLE IF NOT EXISTS dim_agentes_nacionales (
+                    codigo_agente TEXT PRIMARY KEY,
+                    nombre_agente TEXT,
+                    activo INTEGER DEFAULT 1
+                );
+                """,
+            )
             ejecutar_sql(
                 cur,
                 """
@@ -307,17 +327,57 @@ def inicializar_tablas_declaraciones(conn):
         cur.close()
 
 
+def _obtener_agentes_nacionales_registrados(conn=None):
+    """
+    Devuelve un set de códigos de agentes nacionales registrados (inician con '3').
+    Consulta primero `dim_agentes_nacionales` y, si está vacía o no existe, toma los
+    códigos iniciados en '3' de `dim_catalogo_agentes` o `DIRECTORIO_AGENTES_MER`.
+    """
+    nacionales = set()
+    if conn is not None:
+        try:
+            df_nac = ejecutar_consulta_df(
+                "SELECT codigo_agente FROM dim_agentes_nacionales WHERE COALESCE(activo, 1) = 1",
+                conn,
+            )
+            for v in df_nac["codigo_agente"].dropna().tolist():
+                c = _limpiar_texto(v).upper()
+                if c:
+                    nacionales.add(c)
+        except Exception:
+            pass
+
+        if not nacionales:
+            try:
+                df_cat = ejecutar_consulta_df("SELECT codigo_agente FROM dim_catalogo_agentes", conn)
+                for v in df_cat["codigo_agente"].dropna().tolist():
+                    c = _limpiar_texto(v).upper()
+                    if c.startswith("3"):
+                        nacionales.add(c)
+            except Exception:
+                pass
+
+    if not nacionales:
+        for k in DIRECTORIO_AGENTES_MER.keys():
+            c = _limpiar_texto(k).upper()
+            if c.startswith("3"):
+                nacionales.add(c)
+
+    return nacionales
+
+
 def _obtener_codigos_agentes_validos(conn=None):
-    codigos = set(DIRECTORIO_AGENTES_MER.keys())
+    codigos = {_limpiar_texto(k).upper() for k in DIRECTORIO_AGENTES_MER.keys() if _limpiar_texto(k)}
     if conn is not None:
         try:
             df = ejecutar_consulta_df("SELECT codigo_agente FROM dim_catalogo_agentes", conn)
             for v in df["codigo_agente"].dropna().tolist():
-                c = _limpiar_texto(v)
+                c = _limpiar_texto(v).upper()
                 if c:
                     codigos.add(c)
         except Exception:
             pass
+    codigos.update(_obtener_agentes_nacionales_registrados(conn))
     return codigos
 
 
@@ -498,7 +558,25 @@ def validar_declaracion_contratos(
     """
     hallazgos = list(hallazgos_previos or [])
     agentes_validos = _obtener_codigos_agentes_validos(conn)
+    agentes_nacionales = _obtener_agentes_nacionales_registrados(conn)
     fecha_esp = _normalizar_fecha_str(fecha_operacion_esperada)
+    ag_aut = _limpiar_texto(codigo_agente_autorizado).upper()
+
+    if ag_aut and not es_admin:
+        if not ag_aut.startswith("3"):
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": "Sesión",
+                "columna": "Agente",
+                "mensaje": f"El agente autorizado '{ag_aut}' no cumple con el prefijo nacional '3'.",
+            })
+        elif agentes_nacionales and ag_aut not in agentes_nacionales:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": "Sesión",
+                "columna": "Agente",
+                "mensaje": f"El agente nacional '{ag_aut}' no figura en la tabla de agentes nacionales registrados.",
+            })
 
     operador = _limpiar_texto(meta.get("operador"))
     if operador and operador.upper() != "ENEE-HN":
@@ -538,9 +616,9 @@ def validar_declaracion_contratos(
 
     for reg in registros:
         f_lbl = reg["fila_origen"]
-        ag_i = _limpiar_texto(reg.get("agente_i"))
+        ag_i = _limpiar_texto(reg.get("agente_i")).upper()
         pm_i = _limpiar_texto(reg.get("punto_med_i"))
-        ag_r = _limpiar_texto(reg.get("agente_r"))
+        ag_r = _limpiar_texto(reg.get("agente_r")).upper()
         pm_r = _limpiar_texto(reg.get("punto_med_r"))
 
         if not ag_i:
@@ -553,6 +631,22 @@ def validar_declaracion_contratos(
         elif agentes_validos and ag_r not in agentes_validos:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_r", "mensaje": f"Agente_r '{ag_r}' no reconocido en catálogo."})
 
+        # Validación de agentes nacionales (inician con '3' y están registrados para inyectar/retirar)
+        if ag_i.startswith("3") and agentes_nacionales and ag_i not in agentes_nacionales:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": f_lbl,
+                "columna": "Agente_i",
+                "mensaje": f"Agente nacional '{ag_i}' no está registrado en la tabla de agentes nacionales.",
+            })
+        if ag_r.startswith("3") and agentes_nacionales and ag_r not in agentes_nacionales:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": f_lbl,
+                "columna": "Agente_r",
+                "mensaje": f"Agente nacional '{ag_r}' no está registrado en la tabla de agentes nacionales.",
+            })
+
         if ag_i and ag_r and ag_i == ag_r:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_i / Agente_r", "mensaje": "Agente_i y Agente_r no pueden ser iguales."})
 
@@ -561,15 +655,30 @@ def validar_declaracion_contratos(
         if not pm_r:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Punto_Med_r", "mensaje": "Punto_Med_r vacío."})
 
-        if codigo_agente_autorizado and not es_admin:
-            ag_aut = _limpiar_texto(codigo_agente_autorizado)
+        # Restricción estricta para agente nacional autorizado: solo puede subir filas propias (inyección o retiro)
+        if ag_aut and not es_admin:
             if ag_aut not in (ag_i, ag_r):
                 hallazgos.append({
                     "severidad": "ERROR",
                     "fila": f_lbl,
                     "columna": "Agente_i / Agente_r",
-                    "mensaje": f"El registro no corresponde a tu agente autorizado ({ag_aut}).",
+                    "mensaje": f"Acceso denegado: la fila ({ag_i}->{ag_r}) no corresponde al agente nacional autorizado ({ag_aut}).",
                 })
+            else:
+                if ag_i == ag_aut and (not ag_i.startswith("3") or (agentes_nacionales and ag_i not in agentes_nacionales)):
+                    hallazgos.append({
+                        "severidad": "ERROR",
+                        "fila": f_lbl,
+                        "columna": "Agente_i",
+                        "mensaje": f"El agente nacional '{ag_aut}' debe iniciar con '3' y estar registrado para inyectar energía.",
+                    })
+                if ag_r == ag_aut and (not ag_r.startswith("3") or (agentes_nacionales and ag_r not in agentes_nacionales)):
+                    hallazgos.append({
+                        "severidad": "ERROR",
+                        "fila": f_lbl,
+                        "columna": "Agente_r",
+                        "mensaje": f"El agente nacional '{ag_aut}' debe iniciar con '3' y estar registrado para retirar energía.",
+                    })
 
         p_ini, ok_pi = _a_int_periodo(reg.get("periodo_inicio"))
         p_fin, ok_pf = _a_int_periodo(reg.get("periodo_fin"))
@@ -722,7 +831,7 @@ def guardar_declaracion_agente(
     """
     inicializar_tablas_declaraciones(conn)
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
-    ag_clean = _limpiar_texto(codigo_agente)
+    ag_clean = _limpiar_texto(codigo_agente).upper()
     ahora_hn_str = datetime.now(ZONA_HN).strftime("%Y-%m-%d %H:%M:%S")
 
     cur = conn.cursor()
@@ -892,7 +1001,7 @@ def obtener_envios_fecha(conn, fecha_operacion, codigo_agente=None):
              ORDER BY id_envio DESC
             """,
             conn,
-            params=[fecha_clean, _limpiar_texto(codigo_agente)],
+            params=[fecha_clean, _limpiar_texto(codigo_agente).upper()],
         )
     return ejecutar_consulta_df(
         """
