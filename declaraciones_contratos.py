@@ -638,7 +638,7 @@ def validar_declaracion_contratos(
                 if mw_v > 0 and pr_v <= 0:
                     hallazgos.append({"severidad": "ADVERTENCIA", "fila": f_lbl, "columna": f"FLEX Precio{idx_b}", "mensaje": f"Bloque FLEX {idx_b} tiene MW > 0 pero precio <= 0."})
 
-        # Detección de duplicidad exacta por contrato, puntos de medida, modalidad y hora
+        # Traslape/duplicidad bloqueante por contrato, puntos de medida, modalidad y hora
         if ok_pi and ok_pf and p_ini <= p_fin:
             clave_base = (
                 ag_i,
@@ -655,10 +655,10 @@ def validar_declaracion_contratos(
                 clave_hr = clave_base + (hr,)
                 if clave_hr in periodos_vistos:
                     hallazgos.append({
-                        "severidad": "ADVERTENCIA",
+                        "severidad": "ERROR",
                         "fila": f_lbl,
                         "columna": "Periodo",
-                        "mensaje": f"Posible traslape/duplicidad en periodo {hr} para {ag_i}->{ag_r} ({_limpiar_texto(reg.get('tipo_contrato')) or 'sin tipo'}).",
+                        "mensaje": f"Traslape/duplicidad no permitida en periodo {hr} para {ag_i}->{ag_r} ({_limpiar_texto(reg.get('tipo_contrato')) or 'sin tipo'}).",
                     })
                 periodos_vistos.add(clave_hr)
 
