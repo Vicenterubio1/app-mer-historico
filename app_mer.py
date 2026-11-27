@@ -151,7 +151,7 @@ def pantalla_login():
                         rol_u = str(datos_u.get("rol", "visitante")).strip().lower()
                         if rol_u not in ("admin", "visitante", "agente"):
                             rol_u = "visitante"
-                        ag_u = str(datos_u.get("agente", datos_u.get("codigo_agente", ""))).strip()
+                        ag_u = str(datos_u.get("agente", datos_u.get("codigo_agente", ""))).strip().upper()
                         st.session_state["usuario_activo"] = {
                             "usuario": usr_in,
                             "nombre": str(datos_u.get("nombre", usr_in)).strip(),
@@ -629,13 +629,21 @@ def cargar_auditoria_cache():
 
 
 def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
-    """Renderiza el módulo de recepción de declaraciones de contratos con semáforo e integración EOR."""
-    st.subheader("🚦 Declaración de Contratos Regionales (Agentes → EOR)")
-    st.caption(
-        "Recepción diaria de contratos para integrar en la plantilla y archivo XML del EOR. "
-        "Regla de horario (Hora Honduras): declaraciones para **mañana** habilitadas hasta las **09:00 AM**; "
-        "declaraciones para **después de mañana** habilitadas sin restricción."
-    )
+    """Renderiza el módulo de recepción de declaraciones de contratos (vista acotada para agente y completa para admin)."""
+    if es_admin:
+        st.subheader("🚦 Declaración de Contratos Regionales (Agentes → EOR)")
+        st.caption(
+            "Recepción diaria de contratos para integrar en la plantilla y archivo XML del EOR. "
+            "Regla de horario (Hora Honduras): declaraciones para **mañana** habilitadas hasta las **09:00 AM**; "
+            "declaraciones para **después de mañana** habilitadas sin restricción."
+        )
+    else:
+        st.subheader("📤 Carga de Declaración de Contratos Regionales")
+        st.caption(
+            "Sube tu archivo de declaración de contratos (`.xlsm`, `.xlsx` o `.xml`). "
+            "Horario de recepción (Hora Honduras): para **mañana** hasta las **09:00 AM**; "
+            "para fechas **posteriores a mañana** sin restricción."
+        )
 
     def _fmt_ag_decl(cod):
         nom = limpiar_texto_catalogo(mapa_agentes_dict.get(limpiar_codigo(cod), ""))
@@ -664,22 +672,20 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
                 key="decl_agente_sel",
             )
         else:
-            ag_asignado = limpiar_codigo(usuario_actual.get("agente", ""))
-            if ag_asignado:
-                agente_decl_sel = ag_asignado
-                st.text_input(
-                    "Agente Autorizado:",
-                    value=_fmt_ag_decl(agente_decl_sel),
-                    disabled=True,
-                    key="decl_agente_fijo",
+            ag_asignado = limpiar_codigo(usuario_actual.get("agente", "")).upper()
+            if not ag_asignado or not ag_asignado.startswith("3"):
+                st.error(
+                    "Tu usuario no tiene un código de agente nacional válido asignado (debe iniciar con '3'). "
+                    "Contacta al administrador."
                 )
-            else:
-                agente_decl_sel = st.selectbox(
-                    "Agente Autorizado:",
-                    options=opciones_ag_decl,
-                    format_func=_fmt_ag_decl,
-                    key="decl_agente_fallback",
-                )
+                return
+            agente_decl_sel = ag_asignado
+            st.text_input(
+                "Agente Nacional Autorizado:",
+                value=_fmt_ag_decl(agente_decl_sel),
+                disabled=True,
+                key="decl_agente_fijo",
+            )
 
     fecha_decl_iso = fecha_decl_sel.strftime("%Y-%m-%d")
 
@@ -717,7 +723,7 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
         st.session_state["uploader_decl_key"] = 0
 
     archivo_decl = st.file_uploader(
-        "Subir declaración de contratos del agente (.xlsm, .xlsx o .xml):",
+        "Subir archivo de declaración de contratos (.xlsm, .xlsx o .xml):",
         type=["xlsm", "xlsx", "xml"],
         disabled=not permitir_envio,
         key=f"decl_uploader_{st.session_state['uploader_decl_key']}",
@@ -749,15 +755,15 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
         m3.metric("Advertencias", n_adv)
 
         if not df_hallazgos.empty:
-            st.markdown("**Detalle de Validación:**")
+            st.markdown("**Resultado de Validación del Archivo:**")
             st.dataframe(df_hallazgos, use_container_width=True, hide_index=True)
 
         if regs_limpios:
-            with st.expander("👁️ Vista previa de registros detectados", expanded=False):
+            with st.expander("👁️ Vista previa de tus registros detectados", expanded=False):
                 st.dataframe(pd.DataFrame(regs_limpios), use_container_width=True, hide_index=True)
 
         if bloqueado:
-            st.error("⛔ El archivo contiene **ERRORES bloqueantes**. Corrígelos y vuelve a subirlo.")
+            st.error("⛔ El archivo contiene **ERRORES bloqueantes** (o filas de otro agente). Corrígelos y vuelve a subirlo.")
         else:
             if n_adv == 0:
                 st.success("✅ Validación exitosa sin errores ni advertencias.")
@@ -770,7 +776,7 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
                 )
 
             if st.button(
-                "💾 Enviar y Registrar Declaración (pasa a ser la última vigente)",
+                "💾 Enviar y Registrar Declaración",
                 type="primary",
                 disabled=not (permitir_envio and confirmar_adv),
                 key="btn_guardar_decl",
@@ -796,12 +802,14 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
                 st.session_state["uploader_decl_key"] += 1
                 st.success(
                     f"✅ Declaración **#{id_nv}** registrada como **VIGENTE** para `{agente_decl_sel}` "
-                    f"(Fecha operativa: `{fecha_decl_iso}`). Si había un envío anterior para este día, quedó marcado como `REEMPLAZADA`."
+                    f"(Fecha operativa: `{fecha_decl_iso}`)."
                 )
                 st.rerun()
 
     st.divider()
-    st.markdown(f"### 📋 Historial de Declaraciones Recibidas ({fecha_decl_iso})")
+    st.markdown(
+        f"### 📋 {'Historial de Declaraciones Recibidas' if es_admin else 'Mis Envíos Registrados'} ({fecha_decl_iso})"
+    )
     c_hist = obtener_conexion()
     try:
         asegurar_esquema(c_hist)
@@ -811,9 +819,25 @@ def renderizar_modulo_declaraciones_contratos(mapa_agentes_dict):
         c_hist.close()
 
     if not df_envios.empty:
-        st.dataframe(df_envios, use_container_width=True, hide_index=True)
+        if not es_admin:
+            cols_agente_vista = [
+                c for c in [
+                    "id_envio",
+                    "fecha_operacion",
+                    "codigo_agente",
+                    "nombre_archivo",
+                    "estado_vigencia",
+                    "total_filas",
+                    "total_advertencias",
+                    "enviado_en",
+                ]
+                if c in df_envios.columns
+            ]
+            st.dataframe(df_envios[cols_agente_vista], use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(df_envios, use_container_width=True, hide_index=True)
     else:
-        st.info(f"Aún no se han recibido declaraciones de contratos para `{fecha_decl_iso}`.")
+        st.info(f"Aún no hay declaraciones registradas para `{fecha_decl_iso}`.")
 
     if es_admin:
         st.divider()
@@ -874,8 +898,12 @@ if "uploader_zip_key" not in st.session_state:
 # ==========================================
 # ENCABEZADO Y BARRA LATERAL
 # ==========================================
-st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
-st.caption("Ingesta de Predespachos (PUB004), Declaración de Contratos EOR, Catálogo y Reportería Horaria / CND")
+if es_agente:
+    st.title("⚡ Portal de Declaración de Contratos MER")
+    st.caption("Carga y validación de contratos regionales para integración con el Operador de Mercado")
+else:
+    st.title("⚡ Sistema Histórico del Mercado Eléctrico Regional (MER)")
+    st.caption("Ingesta de Predespachos (PUB004), Declaración de Contratos EOR, Catálogo y Reportería Horaria / CND")
 
 if es_admin:
     rol_badge = "Administrador"
@@ -891,6 +919,18 @@ if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
     st.session_state["usuario_activo"] = None
     st.rerun()
 
+mapa_agentes_global = cargar_diccionario_agentes_cache()
+
+# ==========================================
+# MODO RESTRINGIDO EXCLUSIVO PARA AGENTE
+# ==========================================
+if es_agente:
+    renderizar_modulo_declaraciones_contratos(mapa_agentes_global)
+    st.stop()
+
+# ==========================================
+# BARRA LATERAL Y PESTAÑAS PARA ADMIN / CONSULTA
+# ==========================================
 st.sidebar.divider()
 
 if usa_pg:
@@ -934,11 +974,6 @@ else:
     st.sidebar.info("Aún no hay datos cargados.")
     f_ini, f_fin, pais_cod = None, None, None
 
-mapa_agentes_global = cargar_diccionario_agentes_cache()
-
-# ==========================================
-# PESTAÑAS PRINCIPALES (SEGÚN ROL)
-# ==========================================
 if es_admin:
     tab_reportes, tab_declaraciones, tab_catalogo, tab_ingesta, tab_auditoria = st.tabs([
         "📊 Reportería y Balance MER",
@@ -947,14 +982,6 @@ if es_admin:
         "📥 Ingreso de Archivos (ZIP)",
         "🗂️ Auditoría de Base de Datos",
     ])
-elif es_agente:
-    tab_declaraciones, tab_reportes, tab_catalogo = st.tabs([
-        "🚦 Declaración Contratos EOR",
-        "📊 Reportería y Balance MER",
-        "🏷️ Catálogo de Nodos y Agentes",
-    ])
-    tab_ingesta = None
-    tab_auditoria = None
 else:
     tab_reportes, tab_catalogo, tab_auditoria = st.tabs([
         "📊 Reportería y Balance MER",
