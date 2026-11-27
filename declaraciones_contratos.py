@@ -192,6 +192,18 @@ def inicializar_tablas_declaraciones(conn):
             ejecutar_sql(
                 cur,
                 """
+                CREATE TABLE IF NOT EXISTS dim_contratos_firmes (
+                    codigo_contrato_firme TEXT PRIMARY KEY,
+                    agente_autorizado TEXT NOT NULL,
+                    agente_contraparte TEXT DEFAULT '',
+                    descripcion TEXT DEFAULT '',
+                    activo INTEGER DEFAULT 1
+                );
+                """,
+            )
+            ejecutar_sql(
+                cur,
+                """
                 CREATE TABLE IF NOT EXISTS fact_declaraciones_contratos_envios (
                     id_envio SERIAL PRIMARY KEY,
                     fecha_operacion TEXT NOT NULL,
@@ -264,6 +276,18 @@ def inicializar_tablas_declaraciones(conn):
             ejecutar_sql(
                 cur,
                 """
+                CREATE TABLE IF NOT EXISTS dim_contratos_firmes (
+                    codigo_contrato_firme TEXT PRIMARY KEY,
+                    agente_autorizado TEXT NOT NULL,
+                    agente_contraparte TEXT DEFAULT '',
+                    descripcion TEXT DEFAULT '',
+                    activo INTEGER DEFAULT 1
+                );
+                """,
+            )
+            ejecutar_sql(
+                cur,
+                """
                 CREATE TABLE IF NOT EXISTS fact_declaraciones_contratos_envios (
                     id_envio INTEGER PRIMARY KEY AUTOINCREMENT,
                     fecha_operacion TEXT NOT NULL,
@@ -328,11 +352,6 @@ def inicializar_tablas_declaraciones(conn):
 
 
 def _obtener_agentes_nacionales_registrados(conn=None):
-    """
-    Devuelve un set de códigos de agentes nacionales registrados (inician con '3').
-    Consulta primero `dim_agentes_nacionales` y, si está vacía o no existe, toma los
-    códigos iniciados en '3' de `dim_catalogo_agentes` o `DIRECTORIO_AGENTES_MER`.
-    """
     nacionales = set()
     if conn is not None:
         try:
@@ -364,6 +383,68 @@ def _obtener_agentes_nacionales_registrados(conn=None):
                 nacionales.add(c)
 
     return nacionales
+
+
+def _obtener_mapa_contratos_firmes(conn=None):
+    """
+    Retorna un diccionario {CODIGO_CONTRATO_FIRME_UPPER: {'agente_autorizado': ..., 'agente_contraparte': ...}}
+    desde `dim_contratos_firmes`.
+    """
+    mapa = {}
+    if conn is None:
+        return mapa
+    try:
+        df_cf = ejecutar_consulta_df(
+            """
+            SELECT codigo_contrato_firme, agente_autorizado, COALESCE(agente_contraparte, '') AS agente_contraparte
+              FROM dim_contratos_firmes
+             WHERE COALESCE(activo, 1) = 1
+            """,
+            conn,
+        )
+        for _, r in df_cf.iterrows():
+            cod = _limpiar_texto(r.get("codigo_contrato_firme")).upper()
+            ag_aut = _limpiar_texto(r.get("agente_autorizado")).upper()
+            ag_cp = _limpiar_texto(r.get("agente_contraparte")).upper()
+            if cod and ag_aut:
+                mapa[cod] = {"agente_autorizado": ag_aut, "agente_contraparte": ag_cp}
+    except Exception:
+        pass
+    return mapa
+
+
+def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso, agente_actual):
+    """
+    Consulta si otro agente ya tiene registrado como VIGENTE un Codigo_Contrato_Firme
+    en la misma fecha operativa, para evitar declaraciones cruzadas duplicadas.
+    """
+    conflictos = {}
+    if conn is None or not fecha_operacion_iso:
+        return conflictos
+    try:
+        df_v = ejecutar_consulta_df(
+            """
+            SELECT DISTINCT UPPER(TRIM(d.codigo_contrato_firme)) AS cod_cf,
+                            UPPER(TRIM(e.codigo_agente)) AS ag_envio
+              FROM fact_declaraciones_contratos_detalle d
+              JOIN fact_declaraciones_contratos_envios e
+                ON d.id_envio = e.id_envio
+             WHERE d.fecha_operacion = ?
+               AND e.estado_vigencia = 'VIGENTE'
+               AND TRIM(COALESCE(d.codigo_contrato_firme, '')) != ''
+            """,
+            conn,
+            params=[fecha_operacion_iso],
+        )
+        ag_act_up = _limpiar_texto(agente_actual).upper()
+        for _, r in df_v.iterrows():
+            cod_cf = _limpiar_texto(r.get("cod_cf")).upper()
+            ag_env = _limpiar_texto(r.get("ag_envio")).upper()
+            if cod_cf and ag_env and ag_env != ag_act_up:
+                conflictos[cod_cf] = ag_env
+    except Exception:
+        pass
+    return conflictos
 
 
 def _obtener_codigos_agentes_validos(conn=None):
@@ -554,13 +635,22 @@ def validar_declaracion_contratos(
     hallazgos_previos=None,
 ):
     """
-    Valida metadatos y filas. Devuelve (registros_limpios, hallazgos_df, bloqueado).
+    Valida metadatos, filas, titularidad de agentes nacionales y propiedad de Contratos Firmes (CF).
+    Devuelve (registros_limpios, hallazgos_df, bloqueado).
     """
     hallazgos = list(hallazgos_previos or [])
+    if conn is not None:
+        try:
+            inicializar_tablas_declaraciones(conn)
+        except Exception:
+            pass
+
     agentes_validos = _obtener_codigos_agentes_validos(conn)
     agentes_nacionales = _obtener_agentes_nacionales_registrados(conn)
+    mapa_cf = _obtener_mapa_contratos_firmes(conn)
     fecha_esp = _normalizar_fecha_str(fecha_operacion_esperada)
     ag_aut = _limpiar_texto(codigo_agente_autorizado).upper()
+    cf_otros_vigentes = _obtener_cf_vigentes_otros_agentes(conn, fecha_esp, ag_aut)
 
     if ag_aut and not es_admin:
         if not ag_aut.startswith("3"):
@@ -620,6 +710,8 @@ def validar_declaracion_contratos(
         pm_i = _limpiar_texto(reg.get("punto_med_i"))
         ag_r = _limpiar_texto(reg.get("agente_r")).upper()
         pm_r = _limpiar_texto(reg.get("punto_med_r"))
+        tipo_ct = _limpiar_texto(reg.get("tipo_contrato")).upper()
+        cod_cf = _limpiar_texto(reg.get("codigo_contrato_firme")).upper()
 
         if not ag_i:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_i", "mensaje": "Agente_i vacío."})
@@ -637,14 +729,14 @@ def validar_declaracion_contratos(
                 "severidad": "ERROR",
                 "fila": f_lbl,
                 "columna": "Agente_i",
-                "mensaje": f"Agente nacional '{ag_i}' no está registrado en la tabla de agentes nacionales.",
+                "mensaje": f"Agente nacional '{ag_i}' no está registrado en dim_agentes_nacionales.",
             })
         if ag_r.startswith("3") and agentes_nacionales and ag_r not in agentes_nacionales:
             hallazgos.append({
                 "severidad": "ERROR",
                 "fila": f_lbl,
                 "columna": "Agente_r",
-                "mensaje": f"Agente nacional '{ag_r}' no está registrado en la tabla de agentes nacionales.",
+                "mensaje": f"Agente nacional '{ag_r}' no está registrado en dim_agentes_nacionales.",
             })
 
         if ag_i and ag_r and ag_i == ag_r:
@@ -655,7 +747,7 @@ def validar_declaracion_contratos(
         if not pm_r:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Punto_Med_r", "mensaje": "Punto_Med_r vacío."})
 
-        # Restricción estricta para agente nacional autorizado: solo puede subir filas propias (inyección o retiro)
+        # Restricción estricta para agente nacional autorizado: solo puede subir filas propias
         if ag_aut and not es_admin:
             if ag_aut not in (ag_i, ag_r):
                 hallazgos.append({
@@ -664,21 +756,72 @@ def validar_declaracion_contratos(
                     "columna": "Agente_i / Agente_r",
                     "mensaje": f"Acceso denegado: la fila ({ag_i}->{ag_r}) no corresponde al agente nacional autorizado ({ag_aut}).",
                 })
-            else:
-                if ag_i == ag_aut and (not ag_i.startswith("3") or (agentes_nacionales and ag_i not in agentes_nacionales)):
+
+        # Validación de Contrato Firme (CF) y titularidad exclusiva
+        if tipo_ct == "CF" and not cod_cf:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": f_lbl,
+                "columna": "Codigo Contrato Firme",
+                "mensaje": "El Tipo_Contrato es 'CF' pero falta el Codigo Contrato Firme.",
+            })
+
+        if cod_cf:
+            # 1. Verificar contra tabla maestra dim_contratos_firmes
+            if cod_cf in mapa_cf:
+                titular_cf = mapa_cf[cod_cf]["agente_autorizado"]
+                cp_cf = mapa_cf[cod_cf]["agente_contraparte"]
+
+                if ag_aut and ag_aut != titular_cf:
                     hallazgos.append({
                         "severidad": "ERROR",
                         "fila": f_lbl,
-                        "columna": "Agente_i",
-                        "mensaje": f"El agente nacional '{ag_aut}' debe iniciar con '3' y estar registrado para inyectar energía.",
+                        "columna": "Codigo Contrato Firme",
+                        "mensaje": (
+                            f"Inconsistencia de titularidad: el Contrato Firme '{cod_cf}' pertenece "
+                            f"exclusivamente a '{titular_cf}', no puede ser declarado por '{ag_aut}'."
+                        ),
                     })
-                if ag_r == ag_aut and (not ag_r.startswith("3") or (agentes_nacionales and ag_r not in agentes_nacionales)):
+                elif titular_cf not in (ag_i, ag_r):
                     hallazgos.append({
                         "severidad": "ERROR",
                         "fila": f_lbl,
-                        "columna": "Agente_r",
-                        "mensaje": f"El agente nacional '{ag_aut}' debe iniciar con '3' y estar registrado para retirar energía.",
+                        "columna": "Codigo Contrato Firme",
+                        "mensaje": (
+                            f"El Contrato Firme '{cod_cf}' está asignado a '{titular_cf}', "
+                            f"pero la fila declara {ag_i}->{ag_r}."
+                        ),
                     })
+                if cp_cf and cp_cf not in (ag_i, ag_r):
+                    hallazgos.append({
+                        "severidad": "ERROR",
+                        "fila": f_lbl,
+                        "columna": "Codigo Contrato Firme",
+                        "mensaje": (
+                            f"La contraparte registrada para '{cod_cf}' es '{cp_cf}', "
+                            f"pero la fila declara {ag_i}->{ag_r}."
+                        ),
+                    })
+            elif tipo_ct == "CF" and mapa_cf:
+                hallazgos.append({
+                    "severidad": "ERROR",
+                    "fila": f_lbl,
+                    "columna": "Codigo Contrato Firme",
+                    "mensaje": f"El Codigo Contrato Firme '{cod_cf}' no está registrado en dim_contratos_firmes.",
+                })
+
+            # 2. Verificar si otro agente ya declaró como VIGENTE ese mismo Contrato Firme en esta fecha
+            if cod_cf in cf_otros_vigentes:
+                otro_ag = cf_otros_vigentes[cod_cf]
+                hallazgos.append({
+                    "severidad": "ERROR",
+                    "fila": f_lbl,
+                    "columna": "Codigo Contrato Firme",
+                    "mensaje": (
+                        f"Duplicidad entre agentes: el Contrato Firme '{cod_cf}' ya fue declarado "
+                        f"como VIGENTE por '{otro_ag}' para esta fecha operativa."
+                    ),
+                })
 
         p_ini, ok_pi = _a_int_periodo(reg.get("periodo_inicio"))
         p_fin, ok_pf = _a_int_periodo(reg.get("periodo_fin"))
@@ -754,8 +897,8 @@ def validar_declaracion_contratos(
                 pm_i,
                 ag_r,
                 pm_r,
-                _limpiar_texto(reg.get("tipo_contrato")),
-                _limpiar_texto(reg.get("codigo_contrato_firme")),
+                tipo_ct,
+                cod_cf,
                 pmax_ex,
                 flex_ex,
                 tipo_flex,
@@ -767,7 +910,7 @@ def validar_declaracion_contratos(
                         "severidad": "ERROR",
                         "fila": f_lbl,
                         "columna": "Periodo",
-                        "mensaje": f"Traslape/duplicidad no permitida en periodo {hr} para {ag_i}->{ag_r} ({_limpiar_texto(reg.get('tipo_contrato')) or 'sin tipo'}).",
+                        "mensaje": f"Traslape/duplicidad no permitida en periodo {hr} para {ag_i}->{ag_r} ({tipo_ct or 'sin tipo'}).",
                     })
                 periodos_vistos.add(clave_hr)
 
@@ -779,8 +922,8 @@ def validar_declaracion_contratos(
             "punto_med_r": pm_r,
             "periodo_inicio": p_ini if ok_pi else 0,
             "periodo_fin": p_fin if ok_pf else 0,
-            "tipo_contrato": _limpiar_texto(reg.get("tipo_contrato")),
-            "codigo_contrato_firme": _limpiar_texto(reg.get("codigo_contrato_firme")),
+            "tipo_contrato": tipo_ct,
+            "codigo_contrato_firme": cod_cf,
             "titular_dt": _limpiar_texto(reg.get("titular_dt")),
             "responsable_transmision": _limpiar_texto(reg.get("responsable_transmision")),
             "energia_declarada_mw": e_dec if ok_ed else 0.0,
