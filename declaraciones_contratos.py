@@ -108,12 +108,26 @@ def _fecha_a_ddmmyyyy(fecha_iso):
     return datetime.strptime(fecha_iso[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
 
 
+def _preparar_sesion_conn(conn):
+    if conn is None or not es_postgres(conn):
+        return
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
+    finally:
+        cur.close()
+
+
 def evaluar_semaforo_declaracion(fecha_operacion_iso, ahora_hn=None):
     """
     Regla:
-    - Mañana (fecha_op == hoy + 1): VERDE hasta las 09:00 AM (<= 09:00:59), ROJO desde las 09:01 AM.
-    - Después de mañana (fecha_op >= hoy + 2): VERDE sin restricción horaria.
-    - Hoy o fechas pasadas (fecha_op <= hoy): ROJO.
+- Mañana (fecha_op == hoy + 1): VERDE hasta las 09:00 AM (<= 09:00:59), ROJO desde las 09:01 AM.
+- Después de mañana (fecha_op >= hoy + 2): VERDE sin restricción horaria.
+- Hoy o fechas pasadas (fecha_op <= hoy): ROJO.
     """
     if ahora_hn is None:
         ahora_hn = datetime.now(ZONA_HN)
@@ -175,14 +189,14 @@ def evaluar_semaforo_declaracion(fecha_operacion_iso, ahora_hn=None):
 
 
 def inicializar_tablas_declaraciones(conn):
+    _preparar_sesion_conn(conn)
     cur = conn.cursor()
     try:
         if es_postgres(conn):
-            cur.execute(f"SET search_path TO {ESQUEMA_PG}, public;")
             ejecutar_sql(
                 cur,
-                """
-                CREATE TABLE IF NOT EXISTS dim_agentes_nacionales (
+                f"""
+                CREATE TABLE IF NOT EXISTS {ESQUEMA_PG}.dim_agentes_nacionales (
                     codigo_agente TEXT PRIMARY KEY,
                     nombre_agente TEXT,
                     activo INTEGER DEFAULT 1
@@ -191,8 +205,8 @@ def inicializar_tablas_declaraciones(conn):
             )
             ejecutar_sql(
                 cur,
-                """
-                CREATE TABLE IF NOT EXISTS dim_contratos_firmes (
+                f"""
+                CREATE TABLE IF NOT EXISTS {ESQUEMA_PG}.dim_contratos_firmes (
                     codigo_contrato_firme TEXT PRIMARY KEY,
                     agente_autorizado TEXT NOT NULL,
                     agente_contraparte TEXT DEFAULT '',
@@ -203,8 +217,8 @@ def inicializar_tablas_declaraciones(conn):
             )
             ejecutar_sql(
                 cur,
-                """
-                CREATE TABLE IF NOT EXISTS fact_declaraciones_contratos_envios (
+                f"""
+                CREATE TABLE IF NOT EXISTS {ESQUEMA_PG}.fact_declaraciones_contratos_envios (
                     id_envio SERIAL PRIMARY KEY,
                     fecha_operacion TEXT NOT NULL,
                     codigo_agente TEXT NOT NULL,
@@ -223,10 +237,10 @@ def inicializar_tablas_declaraciones(conn):
             )
             ejecutar_sql(
                 cur,
-                """
-                CREATE TABLE IF NOT EXISTS fact_declaraciones_contratos_detalle (
+                f"""
+                CREATE TABLE IF NOT EXISTS {ESQUEMA_PG}.fact_declaraciones_contratos_detalle (
                     id_detalle SERIAL PRIMARY KEY,
-                    id_envio INTEGER NOT NULL REFERENCES fact_declaraciones_contratos_envios(id_envio) ON DELETE CASCADE,
+                    id_envio INTEGER NOT NULL REFERENCES {ESQUEMA_PG}.fact_declaraciones_contratos_envios(id_envio) ON DELETE CASCADE,
                     fecha_operacion TEXT NOT NULL,
                     codigo_agente TEXT NOT NULL,
                     orden_fila INTEGER NOT NULL,
@@ -347,6 +361,12 @@ def inicializar_tablas_declaraciones(conn):
                 """,
             )
         conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         cur.close()
 
@@ -354,6 +374,7 @@ def inicializar_tablas_declaraciones(conn):
 def _obtener_agentes_nacionales_registrados(conn=None):
     nacionales = set()
     if conn is not None:
+        _preparar_sesion_conn(conn)
         try:
             df_nac = ejecutar_consulta_df(
                 "SELECT codigo_agente FROM dim_agentes_nacionales WHERE COALESCE(activo, 1) = 1",
@@ -386,13 +407,10 @@ def _obtener_agentes_nacionales_registrados(conn=None):
 
 
 def _obtener_mapa_contratos_firmes(conn=None):
-    """
-    Retorna un diccionario {CODIGO_CONTRATO_FIRME_UPPER: {'agente_autorizado': ..., 'agente_contraparte': ...}}
-    desde `dim_contratos_firmes`.
-    """
     mapa = {}
     if conn is None:
         return mapa
+    _preparar_sesion_conn(conn)
     try:
         df_cf = ejecutar_consulta_df(
             """
@@ -414,13 +432,10 @@ def _obtener_mapa_contratos_firmes(conn=None):
 
 
 def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso, agente_actual):
-    """
-    Consulta si otro agente ya tiene registrado como VIGENTE un Codigo_Contrato_Firme
-    en la misma fecha operativa, para evitar declaraciones cruzadas duplicadas.
-    """
     conflictos = {}
     if conn is None or not fecha_operacion_iso:
         return conflictos
+    _preparar_sesion_conn(conn)
     try:
         df_v = ejecutar_consulta_df(
             """
@@ -450,6 +465,7 @@ def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso, agente_actual)
 def _obtener_codigos_agentes_validos(conn=None):
     codigos = {_limpiar_texto(k).upper() for k in DIRECTORIO_AGENTES_MER.keys() if _limpiar_texto(k)}
     if conn is not None:
+        _preparar_sesion_conn(conn)
         try:
             df = ejecutar_consulta_df("SELECT codigo_agente FROM dim_catalogo_agentes", conn)
             for v in df["codigo_agente"].dropna().tolist():
@@ -478,10 +494,6 @@ def _fila_vacia(reg):
 
 
 def parsear_archivo_declaracion(file_bytes, nombre_archivo):
-    """
-    Parsea un archivo .xlsm/.xlsx (hoja 'Declaración de contratos') o .xml
-    y retorna: (meta, registros, hallazgos_parseo).
-    """
     nombre_low = (nombre_archivo or "").lower()
     hallazgos = []
     meta = {"operador": "", "fecha_archivo": ""}
@@ -634,10 +646,6 @@ def validar_declaracion_contratos(
     conn=None,
     hallazgos_previos=None,
 ):
-    """
-    Valida metadatos, filas, titularidad de agentes nacionales y propiedad de Contratos Firmes (CF).
-    Devuelve (registros_limpios, hallazgos_df, bloqueado).
-    """
     hallazgos = list(hallazgos_previos or [])
     if conn is not None:
         try:
@@ -723,7 +731,6 @@ def validar_declaracion_contratos(
         elif agentes_validos and ag_r not in agentes_validos:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_r", "mensaje": f"Agente_r '{ag_r}' no reconocido en catálogo."})
 
-        # Validación de agentes nacionales (inician con '3' y están registrados para inyectar/retirar)
         if ag_i.startswith("3") and agentes_nacionales and ag_i not in agentes_nacionales:
             hallazgos.append({
                 "severidad": "ERROR",
@@ -747,7 +754,6 @@ def validar_declaracion_contratos(
         if not pm_r:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Punto_Med_r", "mensaje": "Punto_Med_r vacío."})
 
-        # Restricción estricta para agente nacional autorizado: solo puede subir filas propias
         if ag_aut and not es_admin:
             if ag_aut not in (ag_i, ag_r):
                 hallazgos.append({
@@ -757,7 +763,6 @@ def validar_declaracion_contratos(
                     "mensaje": f"Acceso denegado: la fila ({ag_i}->{ag_r}) no corresponde al agente nacional autorizado ({ag_aut}).",
                 })
 
-        # Validación de Contrato Firme (CF) y titularidad exclusiva
         if tipo_ct == "CF" and not cod_cf:
             hallazgos.append({
                 "severidad": "ERROR",
@@ -767,7 +772,6 @@ def validar_declaracion_contratos(
             })
 
         if cod_cf:
-            # 1. Verificar contra tabla maestra dim_contratos_firmes
             if cod_cf in mapa_cf:
                 titular_cf = mapa_cf[cod_cf]["agente_autorizado"]
                 cp_cf = mapa_cf[cod_cf]["agente_contraparte"]
@@ -810,7 +814,6 @@ def validar_declaracion_contratos(
                     "mensaje": f"El Codigo Contrato Firme '{cod_cf}' no está registrado en dim_contratos_firmes.",
                 })
 
-            # 2. Verificar si otro agente ya declaró como VIGENTE ese mismo Contrato Firme en esta fecha
             if cod_cf in cf_otros_vigentes:
                 otro_ag = cf_otros_vigentes[cod_cf]
                 hallazgos.append({
@@ -890,7 +893,6 @@ def validar_declaracion_contratos(
                 if mw_v > 0 and pr_v <= 0:
                     hallazgos.append({"severidad": "ADVERTENCIA", "fila": f_lbl, "columna": f"FLEX Precio{idx_b}", "mensaje": f"Bloque FLEX {idx_b} tiene MW > 0 pero precio <= 0."})
 
-        # Traslape/duplicidad bloqueante por contrato, puntos de medida, modalidad y hora
         if ok_pi and ok_pf and p_ini <= p_fin:
             clave_base = (
                 ag_i,
@@ -968,10 +970,6 @@ def guardar_declaracion_agente(
     total_errores,
     total_advertencias,
 ):
-    """
-    Guarda una nueva declaración y marca las anteriores del mismo agente y fecha
-    como 'REEMPLAZADA', dejando esta última como 'VIGENTE'.
-    """
     inicializar_tablas_declaraciones(conn)
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
     ag_clean = _limpiar_texto(codigo_agente).upper()
@@ -1133,6 +1131,7 @@ def guardar_declaracion_agente(
 
 def obtener_envios_fecha(conn, fecha_operacion, codigo_agente=None):
     inicializar_tablas_declaraciones(conn)
+    _preparar_sesion_conn(conn)
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
     if codigo_agente:
         return ejecutar_consulta_df(
@@ -1159,10 +1158,8 @@ def obtener_envios_fecha(conn, fecha_operacion, codigo_agente=None):
 
 
 def obtener_detalle_consolidado_fecha(conn, fecha_operacion):
-    """
-    Obtiene únicamente las filas de envíos VIGENTES (última declaración por agente y fecha).
-    """
     inicializar_tablas_declaraciones(conn)
+    _preparar_sesion_conn(conn)
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
     return ejecutar_consulta_df(
         """
@@ -1180,9 +1177,6 @@ def obtener_detalle_consolidado_fecha(conn, fecha_operacion):
 
 
 def generar_excel_consolidado_eor(df_detalle, fecha_operacion, ruta_plantilla="HON20261129.xlsm"):
-    """
-    Genera bytes de un Excel (.xlsx) consolidado con la estructura oficial de 'Declaración de contratos'.
-    """
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
     fecha_eor = _fecha_a_ddmmyyyy(fecha_clean)
 
@@ -1256,9 +1250,6 @@ def generar_excel_consolidado_eor(df_detalle, fecha_operacion, ruta_plantilla="H
 
 
 def generar_xml_consolidado_eor(df_detalle, fecha_operacion, operador="ENEE-HN"):
-    """
-    Genera bytes de HONYYYYMMDDcon.xml a partir del detalle consolidado vigente.
-    """
     fecha_clean = _normalizar_fecha_str(fecha_operacion)
     fecha_eor = _fecha_a_ddmmyyyy(fecha_clean)
 
