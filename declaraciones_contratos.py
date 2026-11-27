@@ -433,10 +433,16 @@ def _obtener_mapa_contratos_firmes(conn=None):
     return mapa
 
 
-def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso, agente_actual):
-    conflictos = {}
+def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso):
+    """
+    Devuelve {CODIGO_CONTRATO_FIRME_UPPER: AGENTE_QUE_LO_DECLARO_VIGENTE}
+    para la fecha operativa indicada. La comparación contra el agente actual
+    se realiza por fila/declarante para que el mismo agente pueda redeclarar
+    sin bloquearse, mientras que otro agente sí queda bloqueado.
+    """
+    vigentes_por_cf = {}
     if conn is None or not fecha_operacion_iso:
-        return conflictos
+        return vigentes_por_cf
     _preparar_sesion_conn(conn)
     try:
         df_v = ejecutar_consulta_df(
@@ -453,15 +459,14 @@ def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso, agente_actual)
             conn,
             params=[fecha_operacion_iso],
         )
-        ag_act_up = _limpiar_texto(agente_actual).upper()
         for _, r in df_v.iterrows():
             cod_cf = _limpiar_texto(r.get("cod_cf")).upper()
             ag_env = _limpiar_texto(r.get("ag_envio")).upper()
-            if cod_cf and ag_env and ag_env != ag_act_up:
-                conflictos[cod_cf] = ag_env
+            if cod_cf and ag_env:
+                vigentes_por_cf[cod_cf] = ag_env
     except Exception:
         pass
-    return conflictos
+    return vigentes_por_cf
 
 
 def _obtener_codigos_agentes_validos(conn=None):
@@ -678,7 +683,7 @@ def validar_declaracion_contratos(
     mapa_cf = _obtener_mapa_contratos_firmes(conn)
     fecha_esp = _normalizar_fecha_str(fecha_operacion_esperada)
     ag_aut = _limpiar_texto(codigo_agente_autorizado).upper()
-    cf_otros_vigentes = _obtener_cf_vigentes_otros_agentes(conn, fecha_esp, ag_aut)
+    cf_vigentes = _obtener_cf_vigentes_otros_agentes(conn, fecha_esp)
 
     if ag_aut and not es_admin:
         if not ag_aut.startswith("3"):
@@ -741,6 +746,14 @@ def validar_declaracion_contratos(
         tipo_ct = _limpiar_texto(reg.get("tipo_contrato")).upper()
         cod_cf = _limpiar_texto(reg.get("codigo_contrato_firme")).upper()
 
+        # Determina el agente nacional declarante efectivo en esta fila
+        declarante_fila = ag_aut
+        if not declarante_fila:
+            if ag_i.startswith("3"):
+                declarante_fila = ag_i
+            elif ag_r.startswith("3"):
+                declarante_fila = ag_r
+
         if not ag_i:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_i", "mensaje": "Agente_i vacío."})
         elif agentes_validos and ag_i not in agentes_validos:
@@ -796,14 +809,14 @@ def validar_declaracion_contratos(
                 titular_cf = mapa_cf[cod_cf]["agente_autorizado"]
                 cp_cf = mapa_cf[cod_cf]["agente_contraparte"]
 
-                if ag_aut and ag_aut != titular_cf:
+                if declarante_fila and declarante_fila != titular_cf:
                     hallazgos.append({
                         "severidad": "ERROR",
                         "fila": f_lbl,
                         "columna": "Codigo Contrato Firme",
                         "mensaje": (
                             f"Inconsistencia de titularidad: el Contrato Firme '{cod_cf}' pertenece "
-                            f"exclusivamente a '{titular_cf}', no puede ser declarado por '{ag_aut}'."
+                            f"exclusivamente a '{titular_cf}', no puede ser declarado por '{declarante_fila}'."
                         ),
                     })
                 elif titular_cf not in (ag_i, ag_r):
@@ -834,15 +847,16 @@ def validar_declaracion_contratos(
                     "mensaje": f"El Codigo Contrato Firme '{cod_cf}' no está registrado en dim_contratos_firmes.",
                 })
 
-            if cod_cf in cf_otros_vigentes:
-                otro_ag = cf_otros_vigentes[cod_cf]
+            # Solo bloquea si OTRO agente distinto ya lo tiene declarado como VIGENTE en la fecha
+            ag_vigente_cf = cf_vigentes.get(cod_cf)
+            if ag_vigente_cf and declarante_fila and ag_vigente_cf != declarante_fila:
                 hallazgos.append({
                     "severidad": "ERROR",
                     "fila": f_lbl,
                     "columna": "Codigo Contrato Firme",
                     "mensaje": (
                         f"Duplicidad entre agentes: el Contrato Firme '{cod_cf}' ya fue declarado "
-                        f"como VIGENTE por '{otro_ag}' para esta fecha operativa."
+                        f"como VIGENTE por '{ag_vigente_cf}' para esta fecha operativa."
                     ),
                 })
 
