@@ -436,9 +436,7 @@ def _obtener_mapa_contratos_firmes(conn=None):
 def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso):
     """
     Devuelve {CODIGO_CONTRATO_FIRME_UPPER: AGENTE_QUE_LO_DECLARO_VIGENTE}
-    para la fecha operativa indicada. La comparación contra el agente actual
-    se realiza por fila/declarante para que el mismo agente pueda redeclarar
-    sin bloquearse, mientras que otro agente sí queda bloqueado.
+    para la fecha operativa indicada.
     """
     vigentes_por_cf = {}
     if conn is None or not fecha_operacion_iso:
@@ -453,7 +451,7 @@ def _obtener_cf_vigentes_otros_agentes(conn, fecha_operacion_iso):
               JOIN fact_declaraciones_contratos_envios e
                 ON d.id_envio = e.id_envio
              WHERE d.fecha_operacion = ?
-               AND e.estado_vigencia = 'VIGENTE'
+               AND UPPER(TRIM(COALESCE(e.estado_vigencia, ''))) = 'VIGENTE'
                AND TRIM(COALESCE(d.codigo_contrato_firme, '')) != ''
             """,
             conn,
@@ -685,6 +683,19 @@ def validar_declaracion_contratos(
     ag_aut = _limpiar_texto(codigo_agente_autorizado).upper()
     cf_vigentes = _obtener_cf_vigentes_otros_agentes(conn, fecha_esp)
 
+    # Agente nacional principal del archivo cuando se sube sin agente fijado (ej. admin)
+    agente_archivo_nac = ""
+    if not ag_aut:
+        for r_tmp in registros:
+            ai_t = _limpiar_texto(r_tmp.get("agente_i")).upper()
+            ar_t = _limpiar_texto(r_tmp.get("agente_r")).upper()
+            if ai_t.startswith("3"):
+                agente_archivo_nac = ai_t
+                break
+            if ar_t.startswith("3"):
+                agente_archivo_nac = ar_t
+                break
+
     if ag_aut and not es_admin:
         if not ag_aut.startswith("3"):
             hallazgos.append({
@@ -746,13 +757,14 @@ def validar_declaracion_contratos(
         tipo_ct = _limpiar_texto(reg.get("tipo_contrato")).upper()
         cod_cf = _limpiar_texto(reg.get("codigo_contrato_firme")).upper()
 
-        # Determina el agente nacional declarante efectivo en esta fila
         declarante_fila = ag_aut
         if not declarante_fila:
             if ag_i.startswith("3"):
                 declarante_fila = ag_i
             elif ag_r.startswith("3"):
                 declarante_fila = ag_r
+            else:
+                declarante_fila = agente_archivo_nac
 
         if not ag_i:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Agente_i", "mensaje": "Agente_i vacío."})
@@ -1019,8 +1031,8 @@ def guardar_declaracion_agente(
                 UPDATE fact_declaraciones_contratos_envios
                    SET estado_vigencia = 'REEMPLAZADA'
                  WHERE fecha_operacion = ?
-                   AND codigo_agente = ?
-                   AND estado_vigencia = 'VIGENTE'
+                   AND UPPER(TRIM(codigo_agente)) = ?
+                   AND UPPER(TRIM(estado_vigencia)) = 'VIGENTE'
                 """,
                 (fecha_clean, ag_clean),
             )
@@ -1055,8 +1067,8 @@ def guardar_declaracion_agente(
                 UPDATE fact_declaraciones_contratos_envios
                    SET estado_vigencia = 'REEMPLAZADA'
                  WHERE fecha_operacion = ?
-                   AND codigo_agente = ?
-                   AND estado_vigencia = 'VIGENTE'
+                   AND UPPER(TRIM(codigo_agente)) = ?
+                   AND UPPER(TRIM(estado_vigencia)) = 'VIGENTE'
                 """,
                 (fecha_clean, ag_clean),
             )
@@ -1173,7 +1185,7 @@ def obtener_envios_fecha(conn, fecha_operacion, codigo_agente=None):
             SELECT *
               FROM fact_declaraciones_contratos_envios
              WHERE fecha_operacion = ?
-               AND codigo_agente = ?
+               AND UPPER(TRIM(codigo_agente)) = ?
              ORDER BY id_envio DESC
             """,
             conn,
@@ -1202,7 +1214,7 @@ def obtener_detalle_consolidado_fecha(conn, fecha_operacion):
           JOIN fact_declaraciones_contratos_envios e
             ON d.id_envio = e.id_envio
          WHERE d.fecha_operacion = ?
-           AND e.estado_vigencia = 'VIGENTE'
+           AND UPPER(TRIM(e.estado_vigencia)) = 'VIGENTE'
          ORDER BY d.codigo_agente ASC, d.id_detalle ASC
         """,
         conn,
