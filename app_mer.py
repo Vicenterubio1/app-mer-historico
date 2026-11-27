@@ -334,35 +334,37 @@ def inicializar_y_sincronizar_catalogo(conn):
                 """,
                 (cod_clean, pais_reg, razon_social.strip(), actividad.strip()),
             )
-agentes_hn_cat = ejecutar_consulta_df(
-    """
-    SELECT codigo_agente, nombre_agente
-      FROM dim_catalogo_agentes
-     WHERE UPPER(TRIM(COALESCE(pais, ''))) = 'HN'
-        OR UPPER(TRIM(codigo_agente)) LIKE '3%'
-    """,
-    conn,
-)
-if not agentes_hn_cat.empty:
-    for _, row in agentes_hn_cat.iterrows():
-        cod_nac = limpiar_codigo(row.get("codigo_agente")).upper()
-        if cod_nac and cod_nac.startswith("3"):
-            nom_nac = limpiar_texto_catalogo(row.get("nombre_agente"))
-            ejecutar_sql(
-                cur,
-                """
-                INSERT INTO dim_agentes_nacionales (codigo_agente, nombre_agente, activo)
-                VALUES (?, ?, 1)
-                ON CONFLICT (codigo_agente) DO UPDATE SET
-                    nombre_agente = CASE
-                        WHEN TRIM(COALESCE(dim_agentes_nacionales.nombre_agente, '')) = ''
-                             AND ? != ''
-                        THEN ?
-                        ELSE dim_agentes_nacionales.nombre_agente
-                    END
-                """,
-                (cod_nac, nom_nac, nom_nac, nom_nac),
-            )
+
+    agentes_hn_cat = ejecutar_consulta_df(
+        """
+        SELECT codigo_agente, nombre_agente
+          FROM dim_catalogo_agentes
+         WHERE UPPER(TRIM(COALESCE(pais, ''))) = 'HN'
+            OR UPPER(TRIM(codigo_agente)) LIKE '3%'
+        """,
+        conn,
+    )
+    if not agentes_hn_cat.empty:
+        for _, row in agentes_hn_cat.iterrows():
+            cod_nac = limpiar_codigo(row.get("codigo_agente")).upper()
+            if cod_nac and cod_nac.startswith("3"):
+                nom_nac = limpiar_texto_catalogo(row.get("nombre_agente"))
+                ejecutar_sql(
+                    cur,
+                    """
+                    INSERT INTO dim_agentes_nacionales (codigo_agente, nombre_agente, activo)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT (codigo_agente) DO UPDATE SET
+                        nombre_agente = CASE
+                            WHEN TRIM(COALESCE(dim_agentes_nacionales.nombre_agente, '')) = ''
+                                 AND ? != ''
+                            THEN ?
+                            ELSE dim_agentes_nacionales.nombre_agente
+                        END
+                    """,
+                    (cod_nac, nom_nac, nom_nac, nom_nac),
+                )
+
     conn.commit()
     cur.close()
 
@@ -1927,7 +1929,7 @@ with tab_catalogo:
             st.dataframe(df_agentes_cat, use_container_width=True, hide_index=True)
 
     with subtab_nac:
-        st.markdown("Administra los agentes nacionales autorizados para inyectar/retirar energía (código iniciado con **3**).")
+        st.markdown("Agentes nacionales sincronizados automáticamente desde el catálogo del MER (código iniciado con **3**).")
         c_cat_nac = obtener_conexion()
         try:
             asegurar_esquema(c_cat_nac)
@@ -1935,6 +1937,12 @@ with tab_catalogo:
                 "SELECT codigo_agente, nombre_agente, COALESCE(activo, 1) AS activo FROM dim_agentes_nacionales ORDER BY codigo_agente",
                 c_cat_nac,
             )
+            if df_nac_cat.empty:
+                inicializar_y_sincronizar_catalogo(c_cat_nac)
+                df_nac_cat = ejecutar_consulta_df(
+                    "SELECT codigo_agente, nombre_agente, COALESCE(activo, 1) AS activo FROM dim_agentes_nacionales ORDER BY codigo_agente",
+                    c_cat_nac,
+                )
         finally:
             c_cat_nac.close()
 
