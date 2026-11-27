@@ -580,19 +580,6 @@ def validar_declaracion_contratos(
         if ok_pi and ok_pf and p_ini > p_fin:
             hallazgos.append({"severidad": "ERROR", "fila": f_lbl, "columna": "Periodo_Inicio / Periodo_Fin", "mensaje": f"Periodo_Inicio ({p_ini}) no puede ser mayor que Periodo_Fin ({p_fin})."})
 
-        if ok_pi and ok_pf and p_ini <= p_fin:
-            clave_base = (ag_i, pm_i, ag_r, pm_r, _limpiar_texto(reg.get("tipo_contrato")))
-            for hr in range(p_ini, p_fin + 1):
-                clave_hr = clave_base + (hr,)
-                if clave_hr in periodos_vistos:
-                    hallazgos.append({
-                        "severidad": "ADVERTENCIA",
-                        "fila": f_lbl,
-                        "columna": "Periodo",
-                        "mensaje": f"Posible traslape/duplicidad en periodo {hr} para {ag_i}->{ag_r}.",
-                    })
-                periodos_vistos.add(clave_hr)
-
         e_dec, ok_ed = _a_float(reg.get("energia_declarada_mw"), 0.0)
         e_req, ok_er = _a_float(reg.get("energia_requerida_mw"), 0.0)
         if not ok_ed or e_dec < 0:
@@ -650,6 +637,30 @@ def validar_declaracion_contratos(
             for idx_b, (mw_v, pr_v) in enumerate(flex_vals, start=1):
                 if mw_v > 0 and pr_v <= 0:
                     hallazgos.append({"severidad": "ADVERTENCIA", "fila": f_lbl, "columna": f"FLEX Precio{idx_b}", "mensaje": f"Bloque FLEX {idx_b} tiene MW > 0 pero precio <= 0."})
+
+        # Detección de duplicidad exacta por contrato, puntos de medida, modalidad y hora
+        if ok_pi and ok_pf and p_ini <= p_fin:
+            clave_base = (
+                ag_i,
+                pm_i,
+                ag_r,
+                pm_r,
+                _limpiar_texto(reg.get("tipo_contrato")),
+                _limpiar_texto(reg.get("codigo_contrato_firme")),
+                pmax_ex,
+                flex_ex,
+                tipo_flex,
+            )
+            for hr in range(p_ini, p_fin + 1):
+                clave_hr = clave_base + (hr,)
+                if clave_hr in periodos_vistos:
+                    hallazgos.append({
+                        "severidad": "ADVERTENCIA",
+                        "fila": f_lbl,
+                        "columna": "Periodo",
+                        "mensaje": f"Posible traslape/duplicidad en periodo {hr} para {ag_i}->{ag_r} ({_limpiar_texto(reg.get('tipo_contrato')) or 'sin tipo'}).",
+                    })
+                periodos_vistos.add(clave_hr)
 
         registros_limpios.append({
             "orden_fila": reg["orden_fila"],
