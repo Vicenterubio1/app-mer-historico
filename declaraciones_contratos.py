@@ -12,6 +12,8 @@ from catalogo_oficial_mer import DIRECTORIO_AGENTES_MER
 
 ZONA_HN = ZoneInfo("America/Tegucigalpa")
 NS_EOR = "http://www.enteoperador.org/schema/DeclaracionDeContratos"
+MAX_BYTES_XML = 10 * 1024 * 1024  # 10 MB
+MAX_NODOS_XML = 25000
 
 COLUMNAS_PLANTILLA_EOR = [
     "Agente_i",
@@ -500,6 +502,14 @@ def parsear_archivo_declaracion(file_bytes, nombre_archivo):
     registros = []
 
     if nombre_low.endswith(".xml"):
+        if len(file_bytes) > MAX_BYTES_XML:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": "-",
+                "columna": "XML",
+                "mensaje": "El archivo XML excede el tamaño máximo permitido de 10 MB.",
+            })
+            return meta, registros, hallazgos
         try:
             root = ET.fromstring(file_bytes)
         except Exception as exc:
@@ -508,6 +518,16 @@ def parsear_archivo_declaracion(file_bytes, nombre_archivo):
                 "fila": "-",
                 "columna": "XML",
                 "mensaje": f"No se pudo leer el archivo XML: {exc}",
+            })
+            return meta, registros, hallazgos
+
+        total_nodos_xml = sum(1 for _ in root.iter())
+        if total_nodos_xml > MAX_NODOS_XML:
+            hallazgos.append({
+                "severidad": "ERROR",
+                "fila": "-",
+                "columna": "XML",
+                "mensaje": f"El archivo XML excede el máximo permitido de {MAX_NODOS_XML} nodos.",
             })
             return meta, registros, hallazgos
 
